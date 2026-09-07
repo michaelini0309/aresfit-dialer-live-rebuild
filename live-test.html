@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<title>AresFit Live Connection Test</title>
+<link rel="icon" href="favicon.ico" sizes="any">
+<style>
+:root{color-scheme:dark;font-family:Arial,sans-serif}*{box-sizing:border-box}body{margin:0;background:#000;color:#fff;min-height:100vh;display:grid;place-items:center;padding:24px}.card{width:min(520px,100%);border:1px solid #2b2b2b;border-radius:18px;background:#0b0b0b;padding:24px}.brand{display:flex;align-items:center;gap:14px;margin-bottom:24px}.brand img{width:62px;height:62px;border-radius:14px}.brand h1{font-size:20px;margin:0}.brand p{margin:4px 0 0;color:#999;font-size:12px}.field{margin:13px 0}.field label{display:block;color:#888;font-size:11px;text-transform:uppercase;margin-bottom:6px}.field input{width:100%;padding:12px;border-radius:10px;border:1px solid #333;background:#111;color:#fff;font-size:15px}button,a.button{width:100%;display:block;text-align:center;padding:13px 15px;border-radius:10px;border:0;font-weight:700;font-size:14px;text-decoration:none;cursor:pointer;margin-top:10px}.primary{background:#fff;color:#000}.secondary{background:#171717;color:#fff;border:1px solid #333!important}.status{margin-top:15px;padding:12px;border:1px solid #292929;border-radius:10px;background:#080808;color:#aaa;font-size:12px;white-space:pre-wrap}.status.ok{border-color:#1f6e43;color:#54df91}.status.bad{border-color:#7e2738;color:#ff6f87}.small{font-size:11px;color:#666;line-height:1.5;margin-top:16px}.leads{margin-top:12px;font-size:12px}.lead{padding:8px 0;border-top:1px solid #222}.lead b{color:#fff}.hidden{display:none}
+</style>
+</head>
+<body>
+<main class="card">
+  <div class="brand"><img src="favicon.ico" alt="AresFit"><div><h1>AresFit live registry test</h1><p>Private rebuild · Michael fork</p></div></div>
+  <div class="field"><label for="email">AresFit email</label><input id="email" type="email" value="michael@aresfit.co.uk" autocomplete="email"></div>
+  <div class="field"><label for="endpoint">Apps Script /exec URL</label><input id="endpoint" type="url" placeholder="https://script.google.com/macros/s/.../exec"></div>
+  <button class="primary" id="verify">Verify rep + read live queue</button>
+  <button class="secondary" id="write">Write smoke test to live Sheet</button>
+  <div id="status" class="status">Backend not configured yet.</div>
+  <div id="leads" class="leads hidden"></div>
+  <a class="button secondary" href="aresfit-dialer-sandde-v2.html">Open existing dialler</a>
+  <div class="small">Test mode only. This page can read rep identity and append to the dedicated “App Smoke Test” tab. It does not edit live lead rows.</div>
+</main>
+<script>
+const BUILD='live-link-2026-09-07.1';
+const endpoint=document.getElementById('endpoint');
+const email=document.getElementById('email');
+const statusEl=document.getElementById('status');
+const leadsEl=document.getElementById('leads');
+endpoint.value=localStorage.getItem('aresfit_live_api_url')||'';
+function setStatus(text,kind=''){statusEl.textContent=text;statusEl.className='status'+(kind?' '+kind:'')}
+function callJsonp(params){
+  return new Promise((resolve,reject)=>{
+    const base=endpoint.value.trim();
+    if(!/^https:\/\/script\.google\.com\/macros\/s\/.+\/exec(?:\?.*)?$/.test(base)){reject(new Error('Paste the deployed Apps Script /exec URL first.'));return}
+    localStorage.setItem('aresfit_live_api_url',base);
+    const cb='aresfitCb_'+Date.now()+'_'+Math.random().toString(36).slice(2);
+    const timer=setTimeout(()=>finish(new Error('Backend timed out. Check the deployment URL and access settings.')),15000);
+    const script=document.createElement('script');
+    function cleanup(){clearTimeout(timer);delete window[cb];script.remove()}
+    function finish(err,data){cleanup();err?reject(err):resolve(data)}
+    window[cb]=data=>finish(null,data);
+    script.onerror=()=>finish(new Error('Could not reach Apps Script.'));
+    const url=new URL(base);Object.entries({...params,callback:cb,_:Date.now()}).forEach(([k,v])=>url.searchParams.set(k,String(v)));
+    script.src=url.toString();document.head.appendChild(script);
+  });
+}
+async function verify(){
+  setStatus('Checking live registry…');leadsEl.classList.add('hidden');
+  try{
+    const data=await callJsonp({action:'get_queue',email:email.value.trim(),limit:10});
+    if(!data.ok)throw new Error(data.error||'Verification failed');
+    setStatus(`Verified ${data.user.name} · ${data.user.rep_id}\nLive assigned leads returned: ${data.total}`, 'ok');
+    leadsEl.innerHTML=(data.leads||[]).map(l=>`<div class="lead"><b>${escapeHtml(l.global_site_id||'')}</b> · ${escapeHtml(l.business_name||'')}<br>${escapeHtml(l.phone||'')} ${l.callback_date?'· callback '+escapeHtml(l.callback_date):''}</div>`).join('')||'<div class="lead">No assigned leads returned by current ownership mapping.</div>';
+    leadsEl.classList.remove('hidden');
+  }catch(e){setStatus(e.message,'bad')}
+}
+async function writeSmoke(){
+  setStatus('Writing smoke-test row…');
+  try{
+    const data=await callJsonp({action:'smoke_test',email:email.value.trim(),value:'GitHub Pages live connection test',app_build:BUILD});
+    if(!data.ok)throw new Error(data.error||'Write failed');
+    setStatus(`SUCCESS\n${data.user.rep_id} wrote to “App Smoke Test” at ${data.timestamp}.`, 'ok');
+  }catch(e){setStatus(e.message,'bad')}
+}
+function escapeHtml(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+document.getElementById('verify').addEventListener('click',verify);
+document.getElementById('write').addEventListener('click',writeSmoke);
+</script>
+</body>
+</html>
