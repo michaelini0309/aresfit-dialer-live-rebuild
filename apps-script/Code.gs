@@ -85,7 +85,8 @@ function getAssignedQueue_(user, limit) {
     if (normalise_(row[h.Current_Owner]) !== ownerName) continue;
     const suppression = normalise_(row[h.Suppression_Status]);
     const callability = normalise_(row[h.Current_Callability_State]);
-    if (suppression && suppression !== 'CLEAR' && suppression !== 'NONE') continue;
+    const allowedSuppression = ['', 'NO', 'CLEAR', 'NONE'];
+    if (!allowedSuppression.includes(suppression)) continue;
     total++;
     if (leads.length >= limit) continue;
     leads.push({
