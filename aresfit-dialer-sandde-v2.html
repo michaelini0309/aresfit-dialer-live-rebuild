@@ -896,7 +896,6 @@ body.light-mode .number-research-link{border-color:rgba(13,107,42,.42);backgroun
       <button class="btn-ghost btn-sm" onclick="openSettings()" aria-label="Settings">&#9881;</button>
     </div>
     <div class="source-summary" id="source-summary">Build 2026.07.22 · No CSV loaded</div>
-    <div id="live-warning" class="block-banner secondary" style="display:none;margin-bottom:8px"><span class="ico">!</span><span class="msg">Registry callability labels are historical. Check current suppression and TPS/CTPS permission before dialing.</span></div>
     <div id="live-sync-status" class="sub" role="status" aria-live="polite" style="display:none;margin:0 0 8px"></div>
     <button type="button" id="live-next-btn" class="btn-ghost btn-sm" style="display:none;width:100%;margin:0 0 8px" onclick="loadLiveQueuePage(false)">Load next 50 live leads</button>
     <div class="stats">
@@ -915,8 +914,6 @@ body.light-mode .number-research-link{border-color:rgba(13,107,42,.42);backgroun
 
   <div class="toolbar">
     <button onclick="openLeads()">&#128203; Leads</button>
-    <button onclick="showHandover()">&#128221; Handover</button>
-    <button onclick="exportCSV()">&#128229; Export</button>
     <button onclick="openSettings()">&#9881; Settings</button>
   </div>
 </div>
@@ -1779,7 +1776,7 @@ document.addEventListener('visibilitychange',()=>{
 function loadPrefs(){try{const p=JSON.parse(localStorage.getItem(PREFS_KEY));if(p)prefs={...prefs,...p}}catch(e){}if(!Array.isArray(prefs.subjects)||!prefs.subjects.length)prefs.subjects=[...DEFAULT_SUBJECTS];if(!prefs.usedSubjects||typeof prefs.usedSubjects!=='object')prefs.usedSubjects={};if(!Array.isArray(prefs.dismissedOverdue))prefs.dismissedOverdue=[];if(typeof prefs.autoQueue!=='boolean')prefs.autoQueue=true;if(typeof prefs.queueBannerCollapsed!=='boolean')prefs.queueBannerCollapsed=true;if(!prefs.diagnostics||typeof prefs.diagnostics!=='object')prefs.diagnostics={};if(!CL_SCHEME_OPTIONS.some(option=>option.value===prefs.clScheme))prefs.clScheme=CL_SCHEME_DEFAULT;if(!prefs.signature)prefs.signature=DEFAULT_SIGNATURE;if(!prefs.emailTemplates||typeof prefs.emailTemplates!=='object')prefs.emailTemplates={};if(!prefs.subjectDomainLock||typeof prefs.subjectDomainLock!=='object')prefs.subjectDomainLock={};ensureQueueGateState()}
 function savePrefs(){try{localStorage.setItem(PREFS_KEY,JSON.stringify(prefs))}catch(e){}}
 function loadEventLog(){try{const rows=JSON.parse(localStorage.getItem(EVENT_LOG_STORAGE_KEY));eventLog=Array.isArray(rows)?rows:[]}catch(e){eventLog=[]}}
-function saveEventLog(){try{localStorage.setItem(EVENT_LOG_STORAGE_KEY,JSON.stringify(eventLog))}catch(e){}}
+function saveEventLog(){try{localStorage.setItem(EVENT_LOG_STORAGE_KEY,JSON.stringify(eventLog));return true}catch(e){return false}}
 const LIVE_OUTBOX_KEY='aresfit_live_registry_outbox_v1';
 const liveBridgeNonce=(location.hash.match(/(?:^#|&)aresfit-bridge=([^&]+)/)||[])[1]||'';
 let liveParentOrigin='',liveBridgeResolve=null,liveBridgeReady=false,liveQueueLoading=false,liveSyncBusy=false,liveNextCursor='';
@@ -1818,12 +1815,13 @@ function liveEventPayload(row){
   return {global_site_id:String(row.lead_id||'').trim(),event_id:'DIALER-'+String(row._event_id||''),channel:String(row.channel||'call'),outcome:String(row.outcome||'HOLD'),note_text:notes,next_action_date:String(row.next_action_date||'')};
 }
 function queueEventForSync(row){
-  if(!row||row._sync_status!=='pending')return;
+  if(!row||row._sync_status!=='pending')return false;
   const payload=liveEventPayload(row);
-  if(!payload.global_site_id){row._sync_status='blocked';row._sync_error='No Global_Site_ID on the live lead.';saveEventLog();updateLiveSyncStatus(row._sync_error);return}
+  if(!payload.global_site_id){row._sync_status='blocked';row._sync_error='No Global_Site_ID on the live lead.';saveEventLog();updateLiveSyncStatus(row._sync_error);return false}
   const outbox=loadLiveOutbox();
   if(!outbox.some(x=>x.event_id===payload.event_id))outbox.push(payload);
-  if(!saveLiveOutbox(outbox)){row._sync_error='Local sync queue could not be saved.';saveEventLog();updateLiveSyncStatus(row._sync_error)}
+  if(!saveLiveOutbox(outbox)){row._sync_error='Local sync queue could not be saved.';saveEventLog();updateLiveSyncStatus(row._sync_error);return false}
+  return true;
 }
 async function syncPendingLiveEvents(){
   if(liveSyncBusy||!hasLiveBridge()||!liveBridgeReady)return;
@@ -2088,8 +2086,11 @@ function appendEventRow(row){
   if(errors.length){alert(errors.join('\n'));return false}
   const event={...row,_event_id:uid(),_sync_status:hasLiveBridge()?'pending':'local-only'};
   eventLog.push(event);
-  saveEventLog();
-  if(hasLiveBridge()){setTimeout(()=>{queueEventForSync(event);syncPendingLiveEvents()},0);flashDot(false);renderSourceSummary();updateLiveSyncStatus('Activity saved on this device; waiting for live registry confirmation…')}
+  if(!saveEventLog()){eventLog.pop();alert('This device could not save the activity. Free browser storage and retry.');return false}
+  if(hasLiveBridge()){
+    if(!queueEventForSync(event)){eventLog.pop();saveEventLog();alert('This device could not queue the activity for live sync. Please retry.');return false}
+    syncPendingLiveEvents();flashDot(false);renderSourceSummary();updateLiveSyncStatus('Activity saved on this device; syncing to the live registry…');
+  }
   else flashDot(true);
   return true;
 }
@@ -2647,6 +2648,7 @@ function renderStats(){
   document.getElementById('s-hot').textContent=hotLeads;
 }
 function renderBlockBanner(){
+  if(hasLiveBridge()){document.getElementById('block-banner-slot').innerHTML='';return}
   // Two-tier model based on 1,457-dial analysis (Sandde + Michael, 18/03-01/05).
   // No meaningful dead zones during working hours (49-61% connect band 09:00-16:59).
   // 17:00 dips to 46% but still viable. 18:00+ and pre-09:00 = venues unstaffed.
@@ -3864,11 +3866,7 @@ function nav(dir){
       return; // do NOT advance on first tap
     }
     // No pending outcome → plain Next (advance regardless of justLogged state)
-    if(hasLiveBridge()&&l&&liveSyncPendingForLead(l)){
-      syncPendingLiveEvents();
-      showToast('Waiting for the live registry to confirm this lead’s saved activity.');
-      return;
-    }
+    if(hasLiveBridge()&&l&&liveSyncPendingForLead(l))syncPendingLiveEvents();
   } else {
     // Prev is navigation only. It must never auto-log a pending outcome.
   }
@@ -4442,7 +4440,6 @@ async function initialiseApp(){
     const zone=document.getElementById('upload-zone');if(zone)zone.style.display='none';
     const refresh=document.getElementById('live-refresh-btn');if(refresh)refresh.style.display='block';
     const help=document.getElementById('upload-instructions');if(help)help.textContent='Your assigned leads load from the live AresFit registry. Call activity syncs back automatically.';
-    const warning=document.getElementById('live-warning');if(warning)warning.style.display='flex';
     updateLiveSyncStatus('Connecting to the live registry…');
     // Load the browser's prior session before the first live refresh. Preserve
     // notes only when the stable registry ID matches; never fuzzy-merge by phone/name.
@@ -4463,6 +4460,7 @@ if(uz){
   uz.addEventListener('drop',ev=>processCsvFile(ev.dataTransfer.files[0]));
 }
 window.addEventListener('online',()=>syncPendingLiveEvents());
+setInterval(()=>syncPendingLiveEvents(),60000);
 
 // Refresh block banner every 5 min in case session crosses an hour
 setInterval(()=>{if(leads.length)renderBlockBanner()},5*60*1000);
