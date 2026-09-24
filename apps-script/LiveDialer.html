@@ -19,7 +19,7 @@
     const pending=new Set();
     function reply(id,result,error){frame.contentWindow.postMessage({type:'ARES_LIVE_RESPONSE',nonce,request_id:id,result,error},DIALER_ORIGIN)}
     frame.addEventListener('load',()=>frame.contentWindow.postMessage({type:'ARES_LIVE_INIT',nonce},DIALER_ORIGIN));
-    frame.src=DIALER_URL+'?live_bridge=4#aresfit-bridge='+encodeURIComponent(nonce);
+    frame.src=DIALER_URL+'?live_bridge=6#aresfit-bridge='+encodeURIComponent(nonce);
     window.addEventListener('message',event=>{
       if(event.origin!==DIALER_ORIGIN||event.source!==frame.contentWindow)return;
       const m=event.data||{};
