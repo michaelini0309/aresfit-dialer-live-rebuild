@@ -23,6 +23,7 @@
     window.addEventListener('message',event=>{
       if(event.origin!==DIALER_ORIGIN||event.source!==frame.contentWindow)return;
       const m=event.data||{};
+      if(m.type==='ARES_LIVE_READY'&&m.nonce===nonce){frame.contentWindow.postMessage({type:'ARES_LIVE_INIT',nonce},DIALER_ORIGIN);return}
       if(m.type!=='ARES_LIVE_REQUEST'||m.nonce!==nonce||!m.request_id||pending.has(m.request_id))return;
       if(!['getQueueForSignedInUser','logActivityForSignedInUser'].includes(m.method))return;
       pending.add(m.request_id);
