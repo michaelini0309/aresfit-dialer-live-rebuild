@@ -1789,7 +1789,7 @@ function hasLiveBridge(){return window.parent!==window&&!!liveBridgeNonce}
 window.addEventListener('message',event=>{
   const m=event.data||{};
   if(event.source!==window.parent||!liveBridgeNonce||m.nonce!==decodeURIComponent(liveBridgeNonce))return;
-  if(event.origin!=='https://script.google.com'&&event.origin!=='https://script.googleusercontent.com'&&!event.origin.endsWith('.script.googleusercontent.com'))return;
+  if(event.origin!=='https://script.google.com'&&event.origin!=='https://script.googleusercontent.com'&&!event.origin.endsWith('.script.googleusercontent.com')&&!event.origin.endsWith('-script.googleusercontent.com'))return;
   liveParentOrigin=event.origin;
   if(m.type==='ARES_LIVE_INIT'){liveBridgeReady=true;liveBridgeResolve(true);return}
   if(m.type==='ARES_LIVE_RESPONSE'&&liveRequests.has(m.request_id)){
@@ -1797,9 +1797,14 @@ window.addEventListener('message',event=>{
     m.error?p.reject(new Error(m.error)):p.resolve(m.result);
   }
 });
+if(hasLiveBridge())window.parent.postMessage({type:'ARES_LIVE_READY',nonce:decodeURIComponent(liveBridgeNonce)},'*');
+function waitForLiveBridge(){
+  if(liveBridgeReady)return Promise.resolve(true);
+  return Promise.race([liveBridgeReadyPromise,new Promise((_,reject)=>setTimeout(()=>reject(new Error('Live dialer connection timed out. Reload the page or tap Load / refresh live leads.')),12000))]);
+}
 function liveServerCall(method,args=[]){
   if(!hasLiveBridge())return Promise.reject(new Error('Live registry bridge is not available.'));
-  return liveBridgeReadyPromise.then(()=>new Promise((resolve,reject)=>{
+  return waitForLiveBridge().then(()=>new Promise((resolve,reject)=>{
     const id='req-'+uid();liveRequests.set(id,{resolve,reject});
     window.parent.postMessage({type:'ARES_LIVE_REQUEST',nonce:decodeURIComponent(liveBridgeNonce),request_id:id,method,args},liveParentOrigin);
     setTimeout(()=>{if(liveRequests.has(id)){liveRequests.delete(id);reject(new Error('Live registry request timed out. Retry when connected.'))}},30000);
