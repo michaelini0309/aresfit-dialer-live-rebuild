@@ -128,7 +128,7 @@ function logActivityForSignedInUser(request) {
     if (duplicateRow) {
       demoteRows.forEach(r => { if (r !== duplicateRow) history.getRange(r,hh.Is_Latest_Event+1).setValue('NO'); });
       if (normalise_(oldRows[duplicateRow-4][hh.Is_Latest_Event]) !== 'YES') history.getRange(duplicateRow,hh.Is_Latest_Event+1).setValue('YES');
-      persistLatestLeadState_(registry,lead.row,h,historyRowLatestNote_(dateKey_(oldRows[duplicateRow-4][hh.Event_Date]),String(oldRows[duplicateRow-4][hh.Event_Time]||''),outcome,storedNote),String(oldRows[duplicateRow-4][hh.Event_Date]||''),String(oldRows[duplicateRow-4][hh.Follow_Up_Date]||''),outcome);
+      persistLatestLeadState_(registry,lead.row,h,historyRowLatestNote_(dateKey_(oldRows[duplicateRow-4][hh.Event_Date]),String(oldRows[duplicateRow-4][hh.Event_Time]||''),outcome,storedNote),String(oldRows[duplicateRow-4][hh.Event_Date]||''),String(oldRows[duplicateRow-4][hh.Follow_Up_Date]||''),outcome,channel,user.name);
       return {ok:true, duplicate:true, event_id:eventId, global_site_id:siteId};
     }
 
@@ -146,13 +146,18 @@ function logActivityForSignedInUser(request) {
     set('Latest_Source','AresFit Live Dialer'); set('Source_Count',1);
     set('Source_Observed_Date',date); set('Context_Only','NO'); set('Is_Latest_Event','YES');
     const appendRow = Math.max(4,history.getLastRow()+1);
+    // The reconciled history may fill every allocated row. Extend the grid
+    // before either formatting or writing the new event.
+    if (appendRow > history.getMaxRows()) {
+      history.insertRowsAfter(history.getMaxRows(), Math.max(100,appendRow-history.getMaxRows()));
+    }
     if (appendRow > 4) history.getRange(appendRow-1,1,1,historyLastCol)
       .copyTo(history.getRange(appendRow,1,1,historyLastCol),SpreadsheetApp.CopyPasteType.PASTE_FORMAT,false);
     // Append the durable event first. A repeated client retry is safe because
     // Event_ID is checked under the script lock before this point.
     history.getRange(appendRow,1,1,historyLastCol).setValues([values]);
     demoteRows.forEach(r => history.getRange(r,hh.Is_Latest_Event+1).setValue('NO'));
-    persistLatestLeadState_(registry,lead.row,h,historyRowLatestNote_(date,time,outcome,storedNote),date,nextActionDate,outcome);
+    persistLatestLeadState_(registry,lead.row,h,historyRowLatestNote_(date,time,outcome,storedNote),date,nextActionDate,outcome,channel,user.name);
     return {ok:true, duplicate:false, event_id:eventId, global_site_id:siteId, timestamp:isoNow_()};
   } finally {
     lock.releaseLock();
@@ -163,10 +168,16 @@ function historyRowLatestNote_(date,time,outcome,note) {
   return [date, time, outcome, note].filter(Boolean).join(' · ');
 }
 
-function persistLatestLeadState_(registry,rowNumber,h,latestNote,eventDate,nextActionDate,outcome) {
+function persistLatestLeadState_(registry,rowNumber,h,latestNote,eventDate,nextActionDate,outcome,channel,repName) {
   const setIfPresent = (name,value) => { if (h[name] != null) registry.getRange(rowNumber,h[name]+1).setValue(value); };
   setIfPresent('Latest_Real_Notes',latestNote);
   setIfPresent('Latest_Activity_Date',eventDate);
+  setIfPresent('Latest_Activity_Type',channel === 'call' ? 'CALL' : channel.toUpperCase());
+  setIfPresent('Latest_Activity_Outcome',outcome);
+  setIfPresent('Latest_Note_Date',eventDate);
+  setIfPresent('Last_Touched_By',repName);
+  setIfPresent('Last_Touched_Date',eventDate);
+  setIfPresent('Last_Registry_Update',isoNow_());
   if (outcome === 'do not touch') {
     setIfPresent('Suppression_Status','YES');
     setIfPresent('Current_Callability_State','NOT_CALLABLE');
@@ -240,6 +251,8 @@ function getAssignedQueue_(user, limit, snapshotIds, offset) {
       decision_maker: value_(row,h,'Decision_Maker'),
       lifecycle_status: value_(row,h,'Current_Lifecycle_Status'),
       activity_status: value_(row,h,'Current_Activity_Status'),
+      latest_outcome: value_(row,h,'Latest_Activity_Outcome'),
+      closed_lost: value_(row,h,'Closed_Lost_Status'),
       callability: value_(row,h,'Current_Callability_State'),
       latest_notes: value_(row,h,'Latest_Real_Notes'),
       callback_date: value_(row,h,'Callback_Date'),
@@ -248,6 +261,8 @@ function getAssignedQueue_(user, limit, snapshotIds, offset) {
     };
     if (!lead.global_site_id) continue;
     if (stoppedIds[lead.global_site_id] || normalise_(lead.callability) === 'NOT_CALLABLE') continue;
+    if (normalise_(lead.lifecycle_status) === 'CLOSED_LOST' || normalise_(lead.closed_lost) === 'YES') continue;
+    if (['LOST','NOT INTERESTED','NOT INT.','PERMANENT CLOSURE CONFIRMED'].includes(normalise_(lead.latest_outcome)) || normalise_(lead.activity_status) === 'PERMANENT CLOSURE CONFIRMED') continue;
     const callback = dateKey_(lead.callback_date);
     const followup = dateKey_(lead.follow_up_date);
     const callability = normalise_(lead.callability);
