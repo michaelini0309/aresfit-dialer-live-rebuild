@@ -14,6 +14,7 @@ function doGet(e) {
   try {
     if (String(p.app || '') === 'live-dialer') {
       return HtmlService.createHtmlOutputFromFile('LiveDialer')
+        .addMetaTag('viewport','width=device-width, initial-scale=1, viewport-fit=cover')
         .setTitle('AresFit Live Registry Dialer');
     }
     const action = String(p.action || '').trim();
