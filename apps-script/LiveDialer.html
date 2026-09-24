@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>AresFit Live Dialer</title>
+  <style>html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#08080d;color:#fff;font:14px system-ui,sans-serif}#status{position:absolute;z-index:2;inset:0 0 auto;padding:8px 12px;background:#20242a;color:#ffd98a}iframe{position:absolute;inset:0;width:100%;height:100%;border:0;background:#08080d}.hidden{display:none}</style>
+</head>
+<body>
+  <div id="status">Connecting to the AresFit live registry…</div>
+  <iframe id="dialer" title="AresFit dialer" allow="autoplay; clipboard-read; clipboard-write" referrerpolicy="origin"></iframe>
+  <script>
+    const DIALER_ORIGIN='https://michaelini0309.github.io';
+    const DIALER_URL=DIALER_ORIGIN+'/aresfit-dialer-live-rebuild/aresfit-dialer-sandde-v2.html';
+    const nonce=crypto.randomUUID();
+    const frame=document.getElementById('dialer');
+    const status=document.getElementById('status');
+    const pending=new Set();
+    function reply(id,result,error){frame.contentWindow.postMessage({type:'ARES_LIVE_RESPONSE',nonce,request_id:id,result,error},DIALER_ORIGIN)}
+    frame.addEventListener('load',()=>frame.contentWindow.postMessage({type:'ARES_LIVE_INIT',nonce},DIALER_ORIGIN));
+    frame.src=DIALER_URL+'#aresfit-bridge='+encodeURIComponent(nonce);
+    window.addEventListener('message',event=>{
+      if(event.origin!==DIALER_ORIGIN||event.source!==frame.contentWindow)return;
+      const m=event.data||{};
+      if(m.type!=='ARES_LIVE_REQUEST'||m.nonce!==nonce||!m.request_id||pending.has(m.request_id))return;
+      if(!['getQueueForSignedInUser','logActivityForSignedInUser'].includes(m.method))return;
+      pending.add(m.request_id);
+      const runner=google.script.run
+        .withSuccessHandler(result=>{pending.delete(m.request_id);if(result&&result.user)status.textContent='Signed in as '+result.user.name+' · live registry connected';reply(m.request_id,result,'')})
+        .withFailureHandler(error=>{pending.delete(m.request_id);const message=error&&error.message||String(error);status.textContent='Live registry error · '+message;reply(m.request_id,null,message)});
+      runner[m.method].apply(runner,Array.isArray(m.args)?m.args:[]);
+    });
+  </script>
+</body>
+</html>

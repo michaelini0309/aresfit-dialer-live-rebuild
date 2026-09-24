@@ -534,7 +534,9 @@ body.light-mode .number-research-link{border-color:rgba(13,107,42,.42);backgroun
   <div class="upload-card">
     <button class="x-btn" onclick="openSetup()">Sender</button>
       <div class="logo" style="font-size:20px;margin-bottom:4px"><span>ARESFIT DIALER</span></div>
-    <p class="sub">Load the current AresFit call sheet.</p>
+    <p class="sub" id="upload-instructions">Load the current AresFit call sheet.</p>
+    <div id="live-load-status" role="status" aria-live="polite" class="sub" style="margin:12px 0"></div>
+    <button type="button" id="live-refresh-btn" class="btn-red" style="display:none;width:100%;padding:14px;margin-bottom:10px" onclick="loadLiveQueuePage(true)">Load / refresh live leads</button>
     <button type="button" class="upload-zone" id="upload-zone" onclick="document.getElementById('csv-in').click()">
       <div class="big">CSV</div>
       <div style="margin-top:8px;font-weight:800;font-size:16px">Drop your CSV</div>
@@ -894,6 +896,9 @@ body.light-mode .number-research-link{border-color:rgba(13,107,42,.42);backgroun
       <button class="btn-ghost btn-sm" onclick="openSettings()" aria-label="Settings">&#9881;</button>
     </div>
     <div class="source-summary" id="source-summary">Build 2026.07.22 · No CSV loaded</div>
+    <div id="live-warning" class="block-banner secondary" style="display:none;margin-bottom:8px"><span class="ico">!</span><span class="msg">Registry callability labels are historical. Check current suppression and TPS/CTPS permission before dialing.</span></div>
+    <div id="live-sync-status" class="sub" role="status" aria-live="polite" style="display:none;margin:0 0 8px"></div>
+    <button type="button" id="live-next-btn" class="btn-ghost btn-sm" style="display:none;width:100%;margin:0 0 8px" onclick="loadLiveQueuePage(false)">Load next 50 live leads</button>
     <div class="stats">
       <div class="stat"><div class="stat-val" id="s-calls">0</div><div class="stat-lbl">Dialled</div></div>
       <div class="stat"><div class="stat-val" id="s-rate">0%</div><div class="stat-lbl">Contact%</div></div>
@@ -1177,6 +1182,7 @@ let queueLeadIds=[];
 let queueLabel='';
 let sourceMeta={fileName:'',rowCount:0,importedAt:0};
 let previousImportSnapshot=null;
+let liveStrictImportIdentity=false;
 let justLoggedId=null; // tracks lead.id that just had an outcome logged - flips Log/Next button to Next on second tap
 let manualNoteOpen=false; // toggles inline manual-note editor on the call card
 let manualNoteText='';    // draft text for the manual-note editor
@@ -1351,7 +1357,8 @@ function createImportSnapshot(){
 function previousLeadForImport(lead,row){
   if(!previousImportSnapshot||!previousImportSnapshot.byKey)return null;
   const leadId=String((row&&row.Lead_ID)||lead.leadId||'').trim();
-  for(const key of leadMatchKeys(leadId,lead.phone,lead.business)){
+  const keys=liveStrictImportIdentity?(leadId?[`id:${leadId.toUpperCase()}`]:[]):leadMatchKeys(leadId,lead.phone,lead.business);
+  for(const key of keys){
     if(previousImportSnapshot.byKey[key])return previousImportSnapshot.byKey[key];
   }
   return null;
@@ -1773,6 +1780,70 @@ function loadPrefs(){try{const p=JSON.parse(localStorage.getItem(PREFS_KEY));if(
 function savePrefs(){try{localStorage.setItem(PREFS_KEY,JSON.stringify(prefs))}catch(e){}}
 function loadEventLog(){try{const rows=JSON.parse(localStorage.getItem(EVENT_LOG_STORAGE_KEY));eventLog=Array.isArray(rows)?rows:[]}catch(e){eventLog=[]}}
 function saveEventLog(){try{localStorage.setItem(EVENT_LOG_STORAGE_KEY,JSON.stringify(eventLog))}catch(e){}}
+const LIVE_OUTBOX_KEY='aresfit_live_registry_outbox_v1';
+const liveBridgeNonce=(location.hash.match(/(?:^#|&)aresfit-bridge=([^&]+)/)||[])[1]||'';
+let liveParentOrigin='',liveBridgeResolve=null,liveBridgeReady=false,liveQueueLoading=false,liveSyncBusy=false,liveNextCursor='';
+const liveRequests=new Map();
+const liveBridgeReadyPromise=new Promise(resolve=>{liveBridgeResolve=resolve});
+function hasLiveBridge(){return window.parent!==window&&!!liveBridgeNonce}
+window.addEventListener('message',event=>{
+  const m=event.data||{};
+  if(event.source!==window.parent||!liveBridgeNonce||m.nonce!==decodeURIComponent(liveBridgeNonce))return;
+  if(event.origin!=='https://script.google.com'&&event.origin!=='https://script.googleusercontent.com'&&!event.origin.endsWith('.script.googleusercontent.com'))return;
+  liveParentOrigin=event.origin;
+  if(m.type==='ARES_LIVE_INIT'){liveBridgeReady=true;liveBridgeResolve(true);return}
+  if(m.type==='ARES_LIVE_RESPONSE'&&liveRequests.has(m.request_id)){
+    const p=liveRequests.get(m.request_id);liveRequests.delete(m.request_id);
+    m.error?p.reject(new Error(m.error)):p.resolve(m.result);
+  }
+});
+function liveServerCall(method,args=[]){
+  if(!hasLiveBridge())return Promise.reject(new Error('Live registry bridge is not available.'));
+  return liveBridgeReadyPromise.then(()=>new Promise((resolve,reject)=>{
+    const id='req-'+uid();liveRequests.set(id,{resolve,reject});
+    window.parent.postMessage({type:'ARES_LIVE_REQUEST',nonce:decodeURIComponent(liveBridgeNonce),request_id:id,method,args},liveParentOrigin);
+    setTimeout(()=>{if(liveRequests.has(id)){liveRequests.delete(id);reject(new Error('Live registry request timed out. Retry when connected.'))}},30000);
+  }));
+}
+function loadLiveOutbox(){try{const rows=JSON.parse(localStorage.getItem(LIVE_OUTBOX_KEY));return Array.isArray(rows)?rows:[]}catch(e){return []}}
+function saveLiveOutbox(rows){try{localStorage.setItem(LIVE_OUTBOX_KEY,JSON.stringify(rows));return true}catch(e){return false}}
+function updateLiveSyncStatus(message){const el=document.getElementById('live-sync-status');if(el){el.style.display=hasLiveBridge()?'block':'none';el.textContent=message||''}}
+function liveEventPayload(row){
+  const notes=[row.notes&&String(row.notes).trim(),row.reason&&`Reason: ${row.reason}`,row.next_action&&`Next action: ${row.next_action}`,row.proof_source&&`Source: ${row.proof_source}`,row.timestamp&&`App time: ${row.timestamp}`].filter(Boolean).join(' | ')||`Outcome: ${row.outcome}`;
+  return {global_site_id:String(row.lead_id||'').trim(),event_id:'DIALER-'+String(row._event_id||''),channel:String(row.channel||'call'),outcome:String(row.outcome||'HOLD'),note_text:notes,next_action_date:String(row.next_action_date||'')};
+}
+function queueEventForSync(row){
+  if(!row||row._sync_status!=='pending')return;
+  const payload=liveEventPayload(row);
+  if(!payload.global_site_id){row._sync_status='blocked';row._sync_error='No Global_Site_ID on the live lead.';saveEventLog();updateLiveSyncStatus(row._sync_error);return}
+  const outbox=loadLiveOutbox();
+  if(!outbox.some(x=>x.event_id===payload.event_id))outbox.push(payload);
+  if(!saveLiveOutbox(outbox)){row._sync_error='Local sync queue could not be saved.';saveEventLog();updateLiveSyncStatus(row._sync_error)}
+}
+async function syncPendingLiveEvents(){
+  if(liveSyncBusy||!hasLiveBridge()||!liveBridgeReady)return;
+  liveSyncBusy=true;
+  try{
+    let outbox=loadLiveOutbox();
+    while(outbox.length){
+      const payload=outbox[0];
+      try{
+        const result=await liveServerCall('logActivityForSignedInUser',[payload]);
+        if(!result||!result.ok)throw new Error(result&&result.error||'Registry did not confirm the event.');
+        outbox=outbox.filter(x=>x.event_id!==payload.event_id);saveLiveOutbox(outbox);
+        const evt=eventLog.find(x=>'DIALER-'+String(x._event_id||'')===payload.event_id);
+        if(evt){evt._sync_status='synced';delete evt._sync_error;saveEventLog()}
+        flashDot(true);renderSourceSummary();updateLiveSyncStatus('Live registry sync confirmed.');
+      }catch(error){
+        const evt=eventLog.find(x=>'DIALER-'+String(x._event_id||'')===payload.event_id);
+        if(evt){evt._sync_error=error.message;saveEventLog()}
+        flashDot(false);renderSourceSummary();updateLiveSyncStatus(`Live registry sync failed: ${error.message}. The event remains on this device and will retry.`);
+        break;
+      }
+    }
+  }finally{liveSyncBusy=false}
+}
+function liveSyncPendingForLead(lead){const id=getLeadId(lead);return eventLog.some(e=>String(e.lead_id||'')===id&&['pending','blocked'].includes(e._sync_status))}
 
 // ===== Setup / user =====
 function loadUser(){try{const u=JSON.parse(localStorage.getItem(SETUP_KEY));if(u&&u.name){user=u;return true}}catch(e){}return false}
@@ -1962,7 +2033,7 @@ function eventLocalDateKey(row){
 function getLeadId(l){
   if(!l)return '';
   const rawRow=raw[l.rawIdx]||{};
-  return String(rawRow.Lead_ID||rawRow['Lead_ID']||l.leadId||'').trim();
+  return String(rawRow.Global_Site_ID||rawRow.Lead_ID||rawRow['Lead_ID']||l.leadId||'').trim();
 }
 function buildEventRow(l,draft){
   draft=draft||{};
@@ -2010,9 +2081,11 @@ function validateEventDraft(row){
 function appendEventRow(row){
   const errors=validateEventDraft(row);
   if(errors.length){alert(errors.join('\n'));return false}
-  eventLog.push({...row,_event_id:uid()});
+  const event={...row,_event_id:uid(),_sync_status:hasLiveBridge()?'pending':'local-only'};
+  eventLog.push(event);
   saveEventLog();
-  flashDot(true);
+  if(hasLiveBridge()){setTimeout(()=>{queueEventForSync(event);syncPendingLiveEvents()},0);flashDot(false);renderSourceSummary();updateLiveSyncStatus('Activity saved on this device; waiting for live registry confirmation…')}
+  else flashDot(true);
   return true;
 }
 function callNextAction(l,p,outcome){
@@ -2284,8 +2357,9 @@ function showMapping(){
   document.getElementById('import-info').innerHTML=`<div class="import-stats"><strong>${raw.length}</strong> total rows · <strong>${extra.length}</strong> extra input cols not included in the 22-column backup: <span style="color:var(--txt3);font-size:11px">${extra.map(esc).join(', ')||'(none)'}</span><br><span class="warn">${dnc} DNC</span>, ${dead} Dead, ${noP} no phone, ${noN} no name<br><strong>~${raw.length-noP-noN} callable</strong> after filter</div>`;
   document.getElementById('map-modal').style.display='flex';
 }
-function confirmImport(){
-  FIELDS.forEach(f=>{mapping[f]=document.getElementById('map-'+f).value});
+function confirmImport(){return completeImport(false)}
+function completeImport(fromLive=false,selectedId=null){
+  if(!fromLive)FIELDS.forEach(f=>{mapping[f]=document.getElementById('map-'+f).value});
   if(!mapping.business||!mapping.phone){alert('Business Name and Phone mappings are required.');return}
   leads=[];idx=0;filter='All';activeFilters=['All'];searchTerm='';queueLeadIds=[];queueLabel='';
   raw.forEach((r,i)=>{
@@ -2298,7 +2372,7 @@ function confirmImport(){
       attempts:0, notes:[], cbDate:'', cbSetAt:0, phone2:'', email2:'',
       preflightPassed:false, mobileVerified:false, michaelAlsoCalled:false, providerReject:false,
       pending:{outcome:'',text:'',callStartTs:0,editedHm:'',speakerRole:''},
-      leadId:String(r.Lead_ID||'').trim()
+      leadId:String(r.Global_Site_ID||r.Lead_ID||'').trim()
     };
     FIELDS.forEach(f=>o[f]=mapping[f]?(r[mapping[f]]||''):'');
     // Two-email support: split on pipe/comma/semicolon. First = primary, second = email2.
@@ -2362,9 +2436,50 @@ function confirmImport(){
   });
   previousImportSnapshot=null;
   document.getElementById('map-modal').style.display='none';
-  restoreLeadQueue(null);showApp();save(true);render();
+  restoreLeadQueue(selectedId);showApp();save(true);render();
 }
 function showApp(){document.getElementById('upload-screen').style.display='none';document.getElementById('main-app').style.display='block'}
+
+function liveRawRows(items){return items.map(l=>({
+  'FINAL PRIORITY':'','Business Name':l.business_name||'','Phone':l.phone||'','Website':'',
+  'Status':STATUS_OPTS.includes(l.activity_status)?l.activity_status:'',
+  'Stage':STAGE_OPTS.includes(l.lifecycle_status)?l.lifecycle_status:'',
+  'Notes':l.latest_notes||'','Follow-up Date':l.callback_date||l.follow_up_date||'',
+  'Equipment Brands':'','AresFit Brands':'','PSC / Decision Maker':l.decision_maker||'',
+  'Email':l.email||'','Call Angle':'','Research Notes':'',
+  'Lead_ID':l.global_site_id||'','Global_Site_ID':l.global_site_id||'',
+  'Current_Callability_State':l.callability||'', 'Suppression_Status':'NO'
+}))}
+async function loadLiveQueuePage(reset=true){
+  if(!hasLiveBridge()){updateLiveSyncStatus('Open this dialer from the AresFit live-registry app.');return false}
+  if(liveQueueLoading)return false;
+  liveQueueLoading=true;
+  const loadStatus=document.getElementById('live-load-status');if(loadStatus)loadStatus.textContent='Reading assigned leads from the live registry…';
+  const selectedId=filtered[idx]?filtered[idx].id:null;
+  try{
+    previousImportSnapshot=createImportSnapshot();
+    const response=await liveServerCall('getQueueForSignedInUser',[reset?'':liveNextCursor]);
+    if(!response||!response.ok)throw new Error(response&&response.error||'Live registry read failed.');
+    const incoming=liveRawRows(response.leads||[]);
+    if(reset){raw=[];leads=[];idx=0;queueLeadIds=[];queueLabel='';eventLog.forEach(e=>{if(e._sync_status==='pending')queueEventForSync(e)})}
+    if(!incoming.length&&reset){if(loadStatus)loadStatus.textContent=`No assigned unsuppressed leads returned for ${response.user.name}.`;updateLiveSyncStatus('Connected to the live registry; no assigned unsuppressed leads were returned.');return false}
+    raw=reset?incoming:raw.concat(incoming);
+    headers=FIELDS.map(f=>LABELS[f]);headers.push('Lead_ID','Global_Site_ID','Current_Callability_State','Suppression_Status');
+    mapping={};FIELDS.forEach(f=>mapping[f]=LABELS[f]);
+    user={name:response.user.name,email:response.user.email||''};
+    if(response.user.sender_name)prefs.senderName=response.user.sender_name;
+    if(response.user.sender_email)prefs.senderEmail=response.user.sender_email;
+    liveNextCursor=response.next_cursor||'';
+    sourceMeta={fileName:'LIVE ARESFIT REGISTRY',rowCount:raw.length,importedAt:Date.now()};
+    const moreBtn=document.getElementById('live-next-btn');if(moreBtn)moreBtn.style.display=liveNextCursor?'block':'none';
+    if(loadStatus)loadStatus.textContent=`Signed in as ${response.user.name} · ${raw.length} loaded · ${response.total} assigned and unsuppressed`;
+    updateLiveSyncStatus(`Connected to the live registry as ${response.user.name}.`);
+    completeImport(true,reset?null:selectedId);
+    syncPendingLiveEvents();
+    return true;
+  }catch(error){if(loadStatus)loadStatus.textContent=`Live registry error: ${error.message}`;updateLiveSyncStatus(`Live registry connection error: ${error.message}`);showToast(`Live registry error · ${error.message}`);return false}
+  finally{liveQueueLoading=false}
+}
 
 // ===== Filters / search =====
 // Predicate per filter - used for multi-filter intersection logic.
@@ -2471,7 +2586,9 @@ function renderSourceSummary(){
   const el=document.getElementById('source-summary');if(!el)return;
   const source=sourceMeta.fileName||'No CSV loaded';
   const imported=sourceMeta.importedAt?new Date(sourceMeta.importedAt).toLocaleString('en-GB',{dateStyle:'short',timeStyle:'short'}):'';
-  el.textContent=`Build ${APP_BUILD} · ${source}${sourceMeta.rowCount?` · ${sourceMeta.rowCount} rows`:''}${imported?` · ${imported}`:''}`;
+  const pending=eventLog.filter(e=>['pending','blocked'].includes(e._sync_status)).length;
+  const failed=eventLog.filter(e=>e._sync_error).length;
+  el.textContent=`Build ${APP_BUILD} · ${source}${sourceMeta.rowCount?` · ${sourceMeta.rowCount} rows`:''}${imported?` · ${imported}`:''}${hasLiveBridge()?` · ${pending?`${pending} sync pending${failed?` (${failed} failed)`:''}`:'Live sync ready'}`:''}`;
 }
 // Multi-filter toggle: tap a filter to add/remove. 'All' clears everything.
 // Empty selection auto-resets to 'All'. Intersection logic in applyFilter.
@@ -3742,6 +3859,11 @@ function nav(dir){
       return; // do NOT advance on first tap
     }
     // No pending outcome → plain Next (advance regardless of justLogged state)
+    if(hasLiveBridge()&&l&&liveSyncPendingForLead(l)){
+      syncPendingLiveEvents();
+      showToast('Waiting for the live registry to confirm this lead’s saved activity.');
+      return;
+    }
   } else {
     // Prev is navigation only. It must never auto-log a pending outcome.
   }
@@ -4306,20 +4428,36 @@ async function initialiseApp(){
   loadPrefs();
   applyTheme();
   loadEventLog();
-  const hasUserSetup=loadUser();
+  const liveMode=hasLiveBridge();
+  const hasUserSetup=liveMode?true:loadUser();
   document.getElementById('upload-screen').style.display='flex';
   try{idb=await openIDB()}catch(e){}
-  if(await hasStoredSession())document.getElementById('resume-box').style.display='block';
   setupModalAccessibility();
+  if(liveMode){
+    const zone=document.getElementById('upload-zone');if(zone)zone.style.display='none';
+    const refresh=document.getElementById('live-refresh-btn');if(refresh)refresh.style.display='block';
+    const help=document.getElementById('upload-instructions');if(help)help.textContent='Your assigned leads load from the live AresFit registry. Call activity syncs back automatically.';
+    const warning=document.getElementById('live-warning');if(warning)warning.style.display='flex';
+    updateLiveSyncStatus('Connecting to the live registry…');
+    // Load the browser's prior session before the first live refresh. Preserve
+    // notes only when the stable registry ID matches; never fuzzy-merge by phone/name.
+    liveStrictImportIdentity=true;
+    if(await hasStoredSession())await loadSession();
+    await loadLiveQueuePage(true);return;
+  }
+  if(await hasStoredSession()){const box=document.getElementById('resume-box');if(box)box.style.display='block'}
   if(!hasUserSetup)setTimeout(openSetup,0);
 }
 initialiseApp();
 
 // Drag-drop on upload zone
 const uz=document.getElementById('upload-zone');
-['dragover','dragenter'].forEach(e=>uz.addEventListener(e,ev=>{ev.preventDefault();uz.classList.add('drag')}));
-['dragleave','drop'].forEach(e=>uz.addEventListener(e,ev=>{ev.preventDefault();uz.classList.remove('drag')}));
-uz.addEventListener('drop',ev=>processCsvFile(ev.dataTransfer.files[0]));
+if(uz){
+  ['dragover','dragenter'].forEach(e=>uz.addEventListener(e,ev=>{ev.preventDefault();uz.classList.add('drag')}));
+  ['dragleave','drop'].forEach(e=>uz.addEventListener(e,ev=>{ev.preventDefault();uz.classList.remove('drag')}));
+  uz.addEventListener('drop',ev=>processCsvFile(ev.dataTransfer.files[0]));
+}
+window.addEventListener('online',()=>syncPendingLiveEvents());
 
 // Refresh block banner every 5 min in case session crosses an hour
 setInterval(()=>{if(leads.length)renderBlockBanner()},5*60*1000);
