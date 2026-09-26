@@ -19,7 +19,7 @@
     const pending=new Set();
     function reply(id,result,error){frame.contentWindow.postMessage({type:'ARES_LIVE_RESPONSE',nonce,request_id:id,result,error},DIALER_ORIGIN)}
     frame.addEventListener('load',()=>frame.contentWindow.postMessage({type:'ARES_LIVE_INIT',nonce},DIALER_ORIGIN));
-    frame.src=DIALER_URL+'?live_bridge=6#aresfit-bridge='+encodeURIComponent(nonce);
+    frame.src=DIALER_URL+'?live_bridge=7#aresfit-bridge='+encodeURIComponent(nonce);
     window.addEventListener('message',event=>{
       if(event.origin!==DIALER_ORIGIN||event.source!==frame.contentWindow)return;
       const m=event.data||{};
@@ -28,10 +28,11 @@
       if(!['getQueueForSignedInUser','logActivityForSignedInUser'].includes(m.method))return;
       pending.add(m.request_id);
       const runner=google.script.run
-        .withSuccessHandler(result=>{pending.delete(m.request_id);if(result&&result.user)status.textContent='Signed in as '+result.user.name+' · live registry connected';reply(m.request_id,result,'')})
-        .withFailureHandler(error=>{pending.delete(m.request_id);const message=error&&error.message||String(error);status.textContent='Live registry error · '+message;reply(m.request_id,null,message)});
+        .withSuccessHandler(result=>{pending.delete(m.request_id);if(result&&result.user)status.classList.add('hidden');reply(m.request_id,result,'')})
+        .withFailureHandler(error=>{pending.delete(m.request_id);const message=error&&error.message||String(error);status.classList.remove('hidden');status.textContent='Live registry error · '+message;reply(m.request_id,null,message)});
       runner[m.method].apply(runner,Array.isArray(m.args)?m.args:[]);
     });
   </script>
 </body>
 </html>
+
