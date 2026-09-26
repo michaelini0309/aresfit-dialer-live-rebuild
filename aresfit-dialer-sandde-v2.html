@@ -410,10 +410,11 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-vis
   .head-row .btn-sm{min-height:32px;padding:5px 8px;font-size:11px}
   .source-summary{display:none}
   .stats{gap:0;margin-bottom:4px;border:1px solid var(--border);border-radius:8px;overflow:hidden;background:var(--card)}
-  .stat{display:flex;align-items:baseline;justify-content:center;gap:4px;padding:5px 2px;border:0;border-right:1px solid var(--border);border-radius:0}
+  .stat{display:flex;align-items:baseline;justify-content:center;gap:3px;padding:2px 2px;border:0;border-right:1px solid var(--border);border-radius:0}
   .stat:last-child{border-right:0}
-  .stat-val{font-size:13px}
-  .stat-lbl{font-size:8px;margin-top:0}
+  .stat-val{font-size:11px}
+  .stat-lbl{font-size:7px;margin-top:0}
+  #settings-modal .source-summary{display:block;white-space:normal;margin-bottom:8px}
   .block-banner{padding:6px 8px;border-width:1px;border-radius:7px;margin-bottom:4px;font-size:10px;gap:6px}
   .block-banner .ico{font-size:9px}
   .queue-strip{padding:5px 7px;margin-bottom:4px;border-radius:7px}
@@ -435,7 +436,7 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-vis
 @media (max-width:340px){
   .head-row .btn-sm{padding:6px 7px;font-size:11px}
   .logo{font-size:14px}
-  .stat-val{font-size:16px}
+  .stat-val{font-size:11px}
   .outcomes button{font-size:12px;padding:10px 4px}
   .speaker-role button{font-size:9px}
   .filter-bar{grid-template-columns:repeat(2,minmax(0,1fr))}
@@ -450,6 +451,7 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-vis
 /* Compatibility for reliability controls added after the original layout. */
 *{letter-spacing:0!important}
 .source-summary,.queue-strip{display:none!important}
+#settings-live-registry .source-summary{display:block!important;white-space:normal}
 .sr-only{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}
 .email-confirmation{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:6px;align-items:center;background:rgba(255,171,0,.08);border:1px solid var(--amber);border-radius:8px;padding:9px 10px;margin:8px 0 12px;color:var(--amber);font-size:11px}
 .email-confirmation div{min-width:0}
@@ -603,6 +605,11 @@ body.light-mode .number-research-link{border-color:rgba(13,107,42,.42);backgroun
     <h2>Sender</h2>
     <p style="font-size:12px;margin-bottom:8px;color:var(--txt2)"><strong style="color:var(--txt)" id="st-name"></strong><br><span id="st-email"></span></p>
     <button class="btn-ghost" style="width:100%;margin-bottom:14px" onclick="openSetup()">Edit sender</button>
+    <div id="settings-live-registry" style="display:none">
+      <h2>Live registry</h2>
+      <div id="live-sync-status" class="sub" role="status" aria-live="polite" style="display:none;margin:0 0 8px"></div>
+      <div class="source-summary" id="source-summary">Build 2026.07.22 · No CSV loaded</div>
+    </div>
     <h2>Data</h2>
     <button class="btn-ghost" style="width:100%;margin-bottom:6px" onclick="exportEventLog()">Export event log</button>
     <button class="btn-ghost" style="width:100%;margin-bottom:6px" onclick="exportNotionDelta()">Export Notion delta</button>
@@ -892,11 +899,7 @@ body.light-mode .number-research-link{border-color:rgba(13,107,42,.42);backgroun
   <div class="sticky-top">
     <div class="head-row">
       <div class="logo"><span>ARESFIT</span><span class="sr-only"> Dialer</span><span class="save-dot" id="save-dot" role="status" aria-label="Save status"></span></div>
-      <button class="btn-ghost btn-sm" onclick="openLeads()">&#128203; Leads</button>
-      <button class="btn-ghost btn-sm" onclick="openSettings()" aria-label="Settings">&#9881;</button>
     </div>
-    <div class="source-summary" id="source-summary">Build 2026.07.22 · No CSV loaded</div>
-    <div id="live-sync-status" class="sub" role="status" aria-live="polite" style="display:none;margin:0 0 8px"></div>
     <button type="button" id="live-next-btn" class="btn-ghost btn-sm" style="display:none;width:100%;margin:0 0 8px" onclick="loadLiveQueuePage(false)">Load next 50 live leads</button>
     <div class="stats">
       <div class="stat"><div class="stat-val" id="s-calls">0</div><div class="stat-lbl">Dialled</div></div>
@@ -1890,6 +1893,7 @@ document.addEventListener('click',e=>{if(!e.target.closest('#setup-preset-dd'))c
 function openSettings(){
   document.getElementById('st-name').textContent=user.name||'(not set)';
   document.getElementById('st-email').textContent=user.email||'';
+  document.getElementById('settings-live-registry').style.display=hasLiveBridge()?'block':'none';
   const sel=document.getElementById('cl-scheme-sel');
   if(sel)sel.innerHTML=CL_SCHEME_OPTIONS.map(o=>`<option value="${esc(o.value)}"${(prefs.clScheme||CL_SCHEME_DEFAULT)===o.value?' selected':''}>${esc(o.label)}</option>`).join('');
   renderQueueGateControls();
@@ -4469,3 +4473,4 @@ setInterval(()=>{if(leads.length){renderDueQueueBanner();if(document.getElementB
 </script>
 </body>
 </html>
+
