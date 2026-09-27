@@ -1814,7 +1814,7 @@ function loadLiveOutbox(){try{const rows=JSON.parse(localStorage.getItem(LIVE_OU
 function saveLiveOutbox(rows){try{localStorage.setItem(LIVE_OUTBOX_KEY,JSON.stringify(rows));return true}catch(e){return false}}
 function updateLiveSyncStatus(message){const el=document.getElementById('live-sync-status');if(el){el.style.display=hasLiveBridge()?'block':'none';el.textContent=message||''}}
 function liveEventPayload(row){
-  const notes=[row.notes&&String(row.notes).trim(),row.reason&&`Reason: ${row.reason}`,row.next_action&&`Next action: ${row.next_action}`,row.proof_source&&`Source: ${row.proof_source}`,row.timestamp&&`App time: ${row.timestamp}`].filter(Boolean).join(' | ')||`Outcome: ${row.outcome}`;
+  const notes=[row.notes&&String(row.notes).trim(),row.reason&&`Reason: ${row.reason}`].filter(Boolean).join(' | ')||`Outcome: ${row.outcome}`;
   return {global_site_id:String(row.lead_id||'').trim(),event_id:'DIALER-'+String(row._event_id||''),channel:String(row.channel||'call'),outcome:String(row.outcome||'HOLD'),note_text:notes,next_action_date:String(row.next_action_date||'')};
 }
 function queueEventForSync(row){
@@ -2441,6 +2441,7 @@ function completeImport(fromLive=false,selectedId=null){
       const rawNotes=o.notes||'';
       o.notes=parseImportedNotes(rawNotes);
     }
+    if(fromLive)o.registryCallHistory=parseLiveCallHistory(r.Registry_Contact_History,r.Registry_Latest_Note);
     mergeImportedLeadHistory(o,previousLeadForImport(o,r));
     leads.push(o);
   });
@@ -2454,7 +2455,9 @@ function liveRawRows(items){return items.map(l=>({
   'FINAL PRIORITY':'','Business Name':l.business_name||'','Phone':l.phone||'','Website':'',
   'Status':STATUS_OPTS.includes(l.activity_status)?l.activity_status:'',
   'Stage':STAGE_OPTS.includes(l.lifecycle_status)?l.lifecycle_status:'',
-  'Notes':l.latest_notes||'','Follow-up Date':l.callback_date||l.follow_up_date||'',
+  'Notes':l.latest_notes||'','Registry_Latest_Note':l.latest_notes||'',
+  'Registry_Contact_History':l.contact_history||'',
+  'Follow-up Date':l.callback_date||l.follow_up_date||'',
   'Equipment Brands':'','AresFit Brands':'','PSC / Decision Maker':l.decision_maker||'',
   'Email':l.email||'','Call Angle':'','Research Notes':'',
   'Lead_ID':l.global_site_id||'','Global_Site_ID':l.global_site_id||'',
@@ -2845,8 +2848,8 @@ function renderCard(){
 
       <div class="notes-wrap activity-history-first">
         <div class="notes-lbl">
-          <span>Activity & notes ${l.notes.length?`· ${l.notes.length}`:''}</span>
-          ${l.notes.length?`<button class="btn-sm btn-ghost" style="font-size:10px;padding:3px 8px" onclick="copyNotes()">Copy all</button>`:''}
+          <span>Activity & notes ${displayNotes(l).length?`· ${displayNotes(l).length}`:''}</span>
+          ${displayNotes(l).length?`<button class="btn-sm btn-ghost" style="font-size:10px;padding:3px 8px" onclick="copyNotes()">Copy all</button>`:''}
         </div>
         <div class="notes-hist" id="notes-hist">${renderNotesHist(l)}</div>
       </div>
@@ -2918,21 +2921,63 @@ function formatNoteText(text){
   if(chunks.length<=1)return esc(raw);
   return chunks.map(c=>`<div class="note-bullet">${esc(c)}</div>`).join('');
 }
+function cleanLiveCallText(value){
+  return String(value||'').replace(/^AresFit dialer event:\s*/i,'')
+    .split(/\s+\|\s+/).filter(part=>!/^(Next action|Source|App time):/i.test(part.trim()))
+    .join(' | ').trim();
+}
+function liveCallOutcome(value){
+  const key=String(value||'').trim().toLowerCase();
+  return {'no answer':'NA','na':'NA','voicemail':'VM','vm':'VM','callback':'Callback',
+    'contacted':'Contacted','not interested':'Not Int.','not int.':'Not Int.',
+    'provider reject':'Provider Reject','dead air':'Dead Air','hot':'HOT'}[key]||'';
+}
+function parseLiveCallHistory(history,latest){
+  const entries=[];
+  String(history||'').split(/\s+\|\s+/).forEach(part=>{
+    const m=part.trim().match(/^(\d{4}-\d{2}-\d{2})\s+[^:|]+:\s+(\d{1,2}\/\d{1,2})\s+(\d{1,2}:\d{2})\s*-\s*([^\-]+?)\s*-\s*([\s\S]+)$/);
+    if(!m)return;
+    const outcome=liveCallOutcome(m[4].replace(/\s+\[(?:DM|GK)\]$/i,''));
+    const note=cleanLiveCallText(m[5]);
+    if(outcome&&note)entries.push({dmy:m[2],hm:m[3],outcome,text:note,registryReadOnly:true});
+  });
+  const recent=String(latest||'').match(/^(\d{4})-(\d{2})-(\d{2})\s*·\s*(\d{2}:\d{2})(?::\d{2})?\s*·\s*([^·]+?)\s*·\s*([\s\S]+)$/);
+  if(recent){
+    const outcome=liveCallOutcome(recent[5]);
+    const note=cleanLiveCallText(recent[6]);
+    if(outcome&&note)entries.push({dmy:recent[3]+'/'+recent[2],hm:recent[4],outcome,text:note,registryReadOnly:true});
+  }
+  return entries;
+}
+function displayNotes(l){
+  if(!hasLiveBridge())return l.notes||[];
+  const seen=new Set();
+  return [...(l.registryCallHistory||[]),...(l.notes||[]).filter(n=>!n.legacy&&(OUTCOMES.includes(n.outcome)||n.manual))]
+    .filter(n=>{
+      const noteText=cleanLiveCallText(n.text).replace(/^(?:(?:VM|NA)\s*-\s*)+/i,'').replace(/\s+/g,' ').toLowerCase();
+      const key=[n.dmy||'',n.hm||'',liveCallOutcome(n.outcome)||n.outcome||'',noteText].join('|');
+      if(seen.has(key))return false;
+      seen.add(key);return true;
+    });
+}
 function renderNotesHist(l){
-  if(!l.notes.length)return '';
-  return l.notes.map(n=>{
-    const tapAttr=`role="button" tabindex="0" onclick="openNoteEdit('${esc(l.id)}','${esc(n.id)}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openNoteEdit('${esc(l.id)}','${esc(n.id)}')}" style="cursor:pointer" title="Edit or delete note"`;
-    if(n.legacy)return `<div class="entry legacy" ${tapAttr}>${formatNoteText(n.text)} <span style="float:right;font-size:10px;color:var(--txt3)">Edit</span></div>`;
+  const notes=displayNotes(l);
+  if(!notes.length)return '';
+  return notes.map(n=>{
+    const readOnly=hasLiveBridge();
+    const tapAttr=readOnly?'':`role="button" tabindex="0" onclick="openNoteEdit('${esc(l.id)}','${esc(n.id)}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openNoteEdit('${esc(l.id)}','${esc(n.id)}')}" style="cursor:pointer" title="Edit or delete note"`;
+    const editLabel=readOnly?'':`<span style="float:right;font-size:10px;color:var(--txt3)">Edit</span>`;
+    if(n.legacy)return `<div class="entry legacy" ${tapAttr}>${formatNoteText(n.text)} ${editLabel}</div>`;
     const time=(n.dmy||n.hm)?`<span class="ts">${esc(n.dmy)}${n.hm?' '+esc(n.hm):''}</span>`:'';
     if(n.manual){
       // Manual admin notes - distinct from call outcomes, render in italic with blue marker
-      return `<div class="entry manual" ${tapAttr}><div class="entry-head">${time} <span class="oc">Note</span></div>${formatNoteText(n.text)}<span style="float:right;font-size:10px;color:var(--txt3)">Edit</span></div>`;
+      return `<div class="entry manual" ${tapAttr}><div class="entry-head">${time} <span class="oc">Note</span></div>${formatNoteText(readOnly?cleanLiveCallText(n.text):n.text)}${editLabel}</div>`;
     }
     const oc=n.outcome?` <span class="oc">${esc(n.outcome)}</span>`:'';
     const speaker=n.speakerRole?` <span class="speaker-badge">${esc(n.speakerRole)}</span>`:'';
     const dir=n.direction?` <span style="font-size:9px;font-weight:700;color:${n.direction==='in'?'var(--amber)':'var(--blue)'}">[${n.direction==='in'?'THEY CALL':'I CALL'}]</span>`:'';
     const rng=n.cbEndTime?` <span style="color:var(--amber);font-family:var(--mono);font-size:11px">→ ${esc(n.cbEndTime)}</span>`:'';
-    return `<div class="entry" ${tapAttr}><div class="entry-head">${time}${oc}${speaker}${dir}${rng}</div>${formatNoteText(n.text)}<span style="float:right;font-size:10px;color:var(--txt3)">Edit</span></div>`;
+    return `<div class="entry" ${tapAttr}><div class="entry-head">${time}${oc}${speaker}${dir}${rng}</div>${formatNoteText(readOnly?cleanLiveCallText(n.text):n.text)}${editLabel}</div>`;
   }).join('');
 }
 // ===== Manual notes (admin entries not tied to a call outcome) =====
@@ -3764,8 +3809,9 @@ async function copyPhone(){const l=filtered[idx];if(!l)return;const d=normaliseD
 async function copyPhone2(){const l=filtered[idx];if(!l)return;const d=normaliseDialNumber(l.phone2);if(!d)return;await copyWithFeedback(d,'Secondary number copied')}
 async function copyBiz(){const l=filtered[idx];if(!l||!l.business)return;await copyWithFeedback(l.business,`Copied: ${l.business}`)}
 async function copyNotes(){
-  const l=filtered[idx];if(!l||!l.notes.length)return;
-  const s=l.notes.map(n=>n.legacy?n.text:`${n.dmy} ${n.hm} - ${n.outcome}${n.speakerRole?` [${n.speakerRole}]`:''} - ${n.text}`).join(' | ');
+  const l=filtered[idx];if(!l)return;
+  const notes=displayNotes(l);if(!notes.length)return;
+  const s=notes.map(n=>n.legacy?n.text:`${n.dmy} ${n.hm} - ${n.outcome}${n.speakerRole?` [${n.speakerRole}]`:''} - ${hasLiveBridge()?cleanLiveCallText(n.text):n.text}`).join(' | ');
   await copyWithFeedback(s,'Notes copied');
 }
 
