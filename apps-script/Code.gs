@@ -256,6 +256,7 @@ function getAssignedQueue_(user, limit, snapshotIds, offset) {
       closed_lost: value_(row,h,'Closed_Lost_Status'),
       callability: value_(row,h,'Current_Callability_State'),
       latest_notes: value_(row,h,'Latest_Real_Notes'),
+      contact_history: value_(row,h,'Rep_Contact_History'),
       callback_date: value_(row,h,'Callback_Date'),
       follow_up_date: value_(row,h,'Follow_Up_Date'),
       latest_activity_date: value_(row,h,'Latest_Activity_Date')
