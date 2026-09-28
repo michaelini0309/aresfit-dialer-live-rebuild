@@ -503,9 +503,26 @@ body.light-mode .number-research-link{border-color:rgba(13,107,42,.42);backgroun
   .more-details-body .fields{grid-template-columns:1fr}
   .more-details-body .field{grid-column:1 / -1}
 }
+.live-loading[hidden]{display:none!important}
+.live-loading{position:fixed;inset:0;z-index:10000;display:grid;place-items:center;background:#000;color:#fff}
+.live-loading-inner{display:grid;justify-items:center;gap:26px;transform:translateY(-2vh)}
+.live-loading-mark{width:min(72vw,276px);aspect-ratio:1;position:relative;display:grid;place-items:center}
+.live-loading-orbit{position:absolute;inset:0;border:2px solid rgba(255,255,255,.12);border-top-color:#fff;border-right-color:rgba(255,255,255,.78);border-radius:50%;animation:live-loading-step 1.5s steps(3,end) infinite}
+.live-loading-orbit::after{content:"";position:absolute;top:12px;left:14px;width:8px;height:8px;border-radius:50%;background:#fff;box-shadow:0 0 14px rgba(255,255,255,.8)}
+.live-loading-logo{width:76%;height:76%;object-fit:contain;filter:grayscale(1) invert(1) contrast(1000);mix-blend-mode:screen}
+.live-loading-caption{color:rgba(255,255,255,.62);font-size:11px;font-weight:650;letter-spacing:.22em;text-transform:uppercase;text-align:center}
+@keyframes live-loading-step{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.live-loading-orbit{animation:none}}
 </style>
 </head>
 <body>
+
+<div id="live-loading" class="live-loading" role="status" aria-live="polite" aria-label="Loading leads from the live registry" hidden>
+  <div class="live-loading-inner">
+    <div class="live-loading-mark" aria-hidden="true"><div class="live-loading-orbit"></div><img class="live-loading-logo" src="assets/aresfit-logo-source.png" alt=""></div>
+    <div class="live-loading-caption">Connecting to live registry</div>
+  </div>
+</div>
 
 <!-- SETUP MODAL (first use) -->
 <div class="modal" id="setup-modal" style="display:none">
@@ -2457,6 +2474,7 @@ function completeImport(fromLive=false,selectedId=null){
   restoreLeadQueue(selectedId);showApp();save(true);render();
 }
 function showApp(){document.getElementById('upload-screen').style.display='none';document.getElementById('main-app').style.display='block'}
+function setLiveLoading(show){const overlay=document.getElementById('live-loading');if(overlay)overlay.hidden=!show}
 
 function liveRawRows(items){return items.map(l=>({
   'FINAL PRIORITY':'','Business Name':l.business_name||'','Phone':l.phone||'','Website':l.website||'',
@@ -2476,6 +2494,7 @@ async function loadLiveQueuePage(reset=true){
   if(!hasLiveBridge()){updateLiveSyncStatus('Open this dialer from the AresFit live-registry app.');return false}
   if(liveQueueLoading)return false;
   liveQueueLoading=true;
+  setLiveLoading(true);
   const loadStatus=document.getElementById('live-load-status');if(loadStatus)loadStatus.textContent='Reading assigned leads from the live registry…';
   const selectedId=filtered[idx]?filtered[idx].id:null;
   try{
@@ -2500,7 +2519,7 @@ async function loadLiveQueuePage(reset=true){
     syncPendingLiveEvents();
     return true;
   }catch(error){if(loadStatus)loadStatus.textContent=`Live registry error: ${error.message}`;updateLiveSyncStatus(`Live registry connection error: ${error.message}`);showToast(`Live registry error · ${error.message}`);return false}
-  finally{liveQueueLoading=false}
+  finally{liveQueueLoading=false;setLiveLoading(false)}
 }
 
 // ===== Filters / search =====
