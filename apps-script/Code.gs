@@ -275,7 +275,8 @@ function getAssignedQueue_(user, limit, snapshotIds, offset) {
     if (!lead.global_site_id) continue;
     const callability = normalise_(lead.callability);
     if (stoppedIds[lead.global_site_id] || callability === 'NOT_CALLABLE' || callability === 'DO_NOT_CALL' || callability.startsWith('NOT_CALL_READY') || callability.startsWith('BLOCKED')) continue;
-    if (normalise_(lead.manual_review) === 'YES' || normalise_(lead.provider_reject) === 'YES' || normalise_(lead.no_gym) === 'YES' || normalise_(lead.ownership_conflict) === 'YES') continue;
+    if ((normalise_(lead.manual_review) === 'YES' && !(queueItem && queueItem.lane === 'CALL')) ||
+        normalise_(lead.provider_reject) === 'YES' || normalise_(lead.no_gym) === 'YES' || normalise_(lead.ownership_conflict) === 'YES') continue;
     if (['RESEARCH_HOLD','BOYS_POOL_AVAILABLE_NOT_CALL_READY','OWNERSHIP_CONFLICT_QUARANTINE'].includes(normalise_(lead.master_category))) continue;
     if (normalise_(lead.lifecycle_status) === 'CLOSED_LOST' || normalise_(lead.closed_lost) === 'YES') continue;
     if (['LOST','NOT INTERESTED','NOT INT.','PERMANENT CLOSURE CONFIRMED'].includes(normalise_(lead.latest_outcome)) || normalise_(lead.activity_status) === 'PERMANENT CLOSURE CONFIRMED') continue;
@@ -387,3 +388,4 @@ function output_(callback, payload) {
   }
   return ContentService.createTextOutput(json).setMimeType(ContentService.MimeType.JSON);
 }
+
