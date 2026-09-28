@@ -506,20 +506,25 @@ body.light-mode .number-research-link{border-color:rgba(13,107,42,.42);backgroun
 .live-loading[hidden]{display:none!important}
 .live-loading{position:fixed;inset:0;z-index:10000;display:grid;place-items:center;background:#000;color:#fff}
 .live-loading-inner{display:grid;justify-items:center;gap:26px;transform:translateY(-2vh)}
-.live-loading-mark{width:min(72vw,276px);aspect-ratio:1;position:relative;display:grid;place-items:center}
-.live-loading-orbit{position:absolute;inset:0;border:2px solid rgba(255,255,255,.12);border-top-color:#fff;border-right-color:rgba(255,255,255,.78);border-radius:50%;animation:live-loading-step 1.5s steps(3,end) infinite}
-.live-loading-orbit::after{content:"";position:absolute;top:12px;left:14px;width:8px;height:8px;border-radius:50%;background:#fff;box-shadow:0 0 14px rgba(255,255,255,.8)}
-.live-loading-logo{width:76%;height:76%;object-fit:contain;filter:grayscale(1) invert(1) contrast(1000);mix-blend-mode:screen}
+.live-loading-mark{width:min(72vw,276px);aspect-ratio:1;display:block}
+.live-loading-ring-group{transform-box:fill-box;transform-origin:50% 50%;animation:live-loading-ring-spin 2.2s linear infinite}
 .live-loading-caption{color:rgba(255,255,255,.62);font-size:11px;font-weight:650;letter-spacing:.22em;text-transform:uppercase;text-align:center}
-@keyframes live-loading-step{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
-@media (prefers-reduced-motion:reduce){.live-loading-orbit{animation:none}}
+@keyframes live-loading-ring-spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.live-loading-ring-group{animation:none}}
 </style>
 </head>
 <body>
 
 <div id="live-loading" class="live-loading" role="status" aria-live="polite" aria-label="Loading leads from the live registry" hidden>
   <div class="live-loading-inner">
-    <div class="live-loading-mark" aria-hidden="true"><div class="live-loading-orbit"></div><img class="live-loading-logo" src="assets/aresfit-logo-source.png" alt=""></div>
+    <svg class="live-loading-mark" viewBox="0 0 256 256" aria-hidden="true">
+      <defs>
+        <filter id="aresfit-ring-only" color-interpolation-filters="sRGB"><feColorMatrix type="matrix" values="0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  2.5 -2.5 0 0 0"/></filter>
+        <filter id="aresfit-helmet-only" color-interpolation-filters="sRGB"><feColorMatrix type="matrix" values="0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  -4.2126 3.2848 -0.0722 0 1"/></filter>
+      </defs>
+      <g class="live-loading-ring-group"><image href="assets/aresfit-logo-source.png" width="256" height="256" filter="url(#aresfit-ring-only)"/></g>
+      <image href="assets/aresfit-logo-source.png" width="256" height="256" filter="url(#aresfit-helmet-only)"/>
+    </svg>
     <div class="live-loading-caption">Connecting to live registry</div>
   </div>
 </div>
@@ -553,9 +558,9 @@ body.light-mode .number-research-link{border-color:rgba(13,107,42,.42);backgroun
   <div class="upload-card">
     <button class="x-btn" onclick="openSetup()">Sender</button>
       <div class="logo" style="font-size:20px;margin-bottom:4px"><span>ARESFIT DIALER</span></div>
-    <p class="sub" id="upload-instructions">Load the current AresFit call sheet.</p>
+    <p class="sub" id="upload-instructions">Select a sender, then connect to the live registry.</p>
     <div id="live-load-status" role="status" aria-live="polite" class="sub" style="margin:12px 0"></div>
-    <button type="button" id="live-refresh-btn" class="btn-red" style="display:none;width:100%;padding:14px;margin-bottom:10px" onclick="loadLiveQueuePage(true)">Load / refresh live leads</button>
+    <button type="button" id="live-refresh-btn" class="btn-red" style="display:none;width:100%;padding:14px;margin-bottom:10px" onclick="loadLiveQueuePage(true)">Connect to the live registry</button>
     <button type="button" class="upload-zone" id="upload-zone" onclick="document.getElementById('csv-in').click()">
       <div class="big">CSV</div>
       <div style="margin-top:8px;font-weight:800;font-size:16px">Drop your CSV</div>
@@ -4521,21 +4526,20 @@ async function initialiseApp(){
   applyTheme();
   loadEventLog();
   const liveMode=hasLiveBridge();
-  const hasUserSetup=liveMode?true:loadUser();
+  const hasUserSetup=loadUser();
   document.getElementById('upload-screen').style.display='flex';
-  try{idb=await openIDB()}catch(e){}
   setupModalAccessibility();
   if(liveMode){
     const zone=document.getElementById('upload-zone');if(zone)zone.style.display='none';
     const refresh=document.getElementById('live-refresh-btn');if(refresh)refresh.style.display='block';
     const help=document.getElementById('upload-instructions');if(help)help.textContent='Your assigned leads load from the live AresFit registry. Call activity syncs back automatically.';
-    updateLiveSyncStatus('Connecting to the live registry…');
-    // Load the browser's prior session before the first live refresh. Preserve
-    // notes only when the stable registry ID matches; never fuzzy-merge by phone/name.
+    updateLiveSyncStatus('Select a sender, then connect to the live registry.');
     liveStrictImportIdentity=true;
-    if(await hasStoredSession())await loadSession();
-    await loadLiveQueuePage(true);return;
+    openSetup();
+    try{idb=await openIDB()}catch(e){}
+    return;
   }
+  try{idb=await openIDB()}catch(e){}
   if(await hasStoredSession()){const box=document.getElementById('resume-box');if(box)box.style.display='block'}
   if(!hasUserSetup)setTimeout(openSetup,0);
 }
