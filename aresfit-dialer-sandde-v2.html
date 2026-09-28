@@ -1815,7 +1815,8 @@ function saveLiveOutbox(rows){try{localStorage.setItem(LIVE_OUTBOX_KEY,JSON.stri
 function updateLiveSyncStatus(message){const el=document.getElementById('live-sync-status');if(el){el.style.display=hasLiveBridge()?'block':'none';el.textContent=message||''}}
 function liveEventPayload(row){
   const notes=[row.notes&&String(row.notes).trim(),row.reason&&`Reason: ${row.reason}`].filter(Boolean).join(' | ')||`Outcome: ${row.outcome}`;
-  return {global_site_id:String(row.lead_id||'').trim(),event_id:'DIALER-'+String(row._event_id||''),channel:String(row.channel||'call'),outcome:String(row.outcome||'HOLD'),note_text:notes,next_action_date:String(row.next_action_date||'')};
+  const action=String(row.next_action||'').trim().toUpperCase();
+  return {global_site_id:String(row.lead_id||'').trim(),event_id:'DIALER-'+String(row._event_id||''),channel:String(row.channel||'call'),outcome:String(row.outcome||'HOLD'),note_text:notes,next_action_date:String(row.next_action_date||''),next_action:['CALL','EMAIL','WAIT','NONE'].includes(action)?action:''};
 }
 function queueEventForSync(row){
   if(!row||row._sync_status!=='pending')return false;
@@ -2099,11 +2100,11 @@ function appendEventRow(row){
   return true;
 }
 function callNextAction(l,p,outcome){
-  if(outcome==='lost')return 'lost';
-  if(outcome==='do not touch')return 'do not touch';
-  if(p&&p.outcome==='Callback')return 'callback';
-  if(p&&p.outcome==='Emailed')return 'send requested email';
-  return (l&&l.status)||'';
+  if(outcome==='lost'||outcome==='do not touch')return 'NONE';
+  if(p&&p.outcome==='Callback')return p.direction==='in'?'WAIT':'CALL';
+  if(p&&['Contacted','HOT'].includes(p.outcome)&&['CALL','EMAIL','WAIT','NONE'].includes(p.nextAction))return p.nextAction;
+  if(p&&p.outcome==='Emailed')return 'EMAIL';
+  return '';
 }
 function buildCallEventRow(l,noteEntry,p){
   const outcome=CALL_OUTCOME_EVENT_MAP[p.outcome]||'HOLD';
@@ -2384,6 +2385,12 @@ function completeImport(fromLive=false,selectedId=null){
       pending:{outcome:'',text:'',callStartTs:0,editedHm:'',speakerRole:''},
       leadId:String(r.Global_Site_ID||r.Lead_ID||'').trim()
     };
+    if(fromLive){
+      o.queueReason=String(r.Registry_Queue_Reason||'').trim();
+      o.queueReasonDate=String(r.Registry_Queue_Reason_Date||'').trim();
+      o.originalRegistryNotes=String(r.Registry_Latest_Note||'').trim();
+      o.originalRegistryHistory=String(r.Registry_Contact_History||'').trim();
+    }
     FIELDS.forEach(f=>o[f]=mapping[f]?(r[mapping[f]]||''):'');
     // Two-email support: split on pipe/comma/semicolon. First = primary, second = email2.
     if(o.email&&/[|,;]/.test(o.email)){
@@ -2452,11 +2459,13 @@ function completeImport(fromLive=false,selectedId=null){
 function showApp(){document.getElementById('upload-screen').style.display='none';document.getElementById('main-app').style.display='block'}
 
 function liveRawRows(items){return items.map(l=>({
-  'FINAL PRIORITY':'','Business Name':l.business_name||'','Phone':l.phone||'','Website':'',
+  'FINAL PRIORITY':'','Business Name':l.business_name||'','Phone':l.phone||'','Website':l.website||'',
   'Status':STATUS_OPTS.includes(l.activity_status)?l.activity_status:'',
   'Stage':STAGE_OPTS.includes(l.lifecycle_status)?l.lifecycle_status:'',
   'Notes':l.latest_notes||'','Registry_Latest_Note':l.latest_notes||'',
   'Registry_Contact_History':l.contact_history||'',
+  'Registry_Queue_Reason':l.queue_reason||'',
+  'Registry_Queue_Reason_Date':l.queue_reason_date||'',
   'Follow-up Date':l.callback_date||l.follow_up_date||'',
   'Equipment Brands':'','AresFit Brands':'','PSC / Decision Maker':l.decision_maker||'',
   'Email':l.email||'','Call Angle':'','Research Notes':'',
@@ -2761,7 +2770,7 @@ function renderCard(){
         <span class="att" title="Attempts">${l.attempts||0} attempts</span>
         ${queueLeadIds.length?`<span class="queue-chip" title="${esc(queueLabel||'Filtered queue')}"><span class="queue-name">${esc(queueLabel||'Queue')}</span><span>${idx+1}/${filtered.length}</span><button type="button" onclick="clearLeadQueue()" aria-label="Clear active queue" title="Clear active queue">&times;</button></span>`:''}
       </div>
-      <div class="biz-head" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">${esc(l.business)}<button class="btn-sm btn-ghost" style="padding:5px 9px;font-weight:600;line-height:1;align-self:center" onclick="copyBiz()">Copy name</button></div>
+      <div class="biz-head" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">${esc(l.business)}${hasLiveBridge()&&l.queueReason?`<details class="reveal" style="font-size:12px;font-weight:400;max-width:100%"><summary aria-label="Why this lead is in the call queue" title="Why this lead is in the call queue">▾</summary><div>${esc(l.queueReason)}${l.queueReasonDate?` · Source ${esc(l.queueReasonDate)}`:''}</div></details>`:''}<button class="btn-sm btn-ghost" style="padding:5px 9px;font-weight:600;line-height:1;align-self:center" onclick="copyBiz()">Copy name</button></div>
       ${(()=>{
         // Top-line context strip - at-a-glance summary so you know where you left off without scrolling notes
         const lastTs=latestNoteTs(l);
@@ -2771,8 +2780,8 @@ function renderCard(){
           const days=Math.floor((Date.now()-lastDated.ts)/86400000);
           const ago=days===0?'today':(days===1?'yesterday':`${days}d ago`);
           parts.push(`Last: <strong>${esc(lastDated.outcome||'note')}</strong> ${ago}`);
-        } else if(l.notes.some(n=>n.legacy)){
-          parts.push('Legacy notes only');
+        } else if(l.notes.some(n=>n.legacy)||l.originalRegistryHistory||l.registryCallHistory?.length){
+          parts.push('Historical notes available');
         } else {
           parts.push('Never called');
         }
@@ -2852,6 +2861,8 @@ function renderCard(){
           ${displayNotes(l).length?`<button class="btn-sm btn-ghost" style="font-size:10px;padding:3px 8px" onclick="copyNotes()">Copy all</button>`:''}
         </div>
         <div class="notes-hist" id="notes-hist">${renderNotesHist(l)}</div>
+        ${hasLiveBridge()&&!displayNotes(l).length&&l.originalRegistryNotes&&!/^(?:Status snapshot:|Recycled from|Why worth calling:|\[SOURCE\b)/i.test(l.originalRegistryNotes)?`<div class="entry legacy">${esc(l.originalRegistryNotes.slice(0,280))}${l.originalRegistryNotes.length>280?`<details class="reveal"><summary>Read full latest note</summary><div style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(l.originalRegistryNotes)}</div></details>`:''}</div>`:''}
+        ${hasLiveBridge()&&(l.originalRegistryNotes||l.originalRegistryHistory)?`<details class="reveal" style="margin-top:6px"><summary>Original registry notes</summary><div style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(l.originalRegistryHistory||l.originalRegistryNotes)}${l.originalRegistryNotes&&!l.originalRegistryHistory.includes(l.originalRegistryNotes)?`\n${esc(l.originalRegistryNotes)}`:''}</div></details>`:''}
       </div>
 
       <button class="btn-ghost" onclick="openManualEvent()" style="width:100%;font-size:12px;margin:0 0 10px">Log WhatsApp, quote, supplier, Shopify, blocker, or app issue</button>
@@ -2874,6 +2885,7 @@ function renderCard(){
         <div class="new-note-row">
           <textarea id="new-note" class="${pending.outcome&&!pending.text.trim()&&!(pending.outcome in AUTOFILL_OUTCOMES)?'pending':''}" placeholder="${pending.outcome?(AUTOFILL_OUTCOMES[pending.outcome]?'optional - will auto-fill \"'+AUTOFILL_OUTCOMES[pending.outcome]+'\" if blank':'who answered · brands · timing · next action'):'tap an outcome above'}" oninput="updatePending(this.value)">${esc(pending.text)}</textarea>
         </div>
+        ${['Contacted','HOT'].includes(pending.outcome)?`<div style="margin-top:8px"><label class="field-lbl" for="pending-next-action">Next action</label><select id="pending-next-action" onchange="setPendingNextAction(this.value)"><option value="">Decide later</option>${[['CALL','Call again'],['EMAIL','Email'],['WAIT','Wait for them'],['NONE','No further action']].map(([v,label])=>`<option value="${v}"${pending.nextAction===v?' selected':''}>${label}</option>`).join('')}</select></div>`:''}
         ${pendingEventOutcome==='lost'?`<div style="margin-top:8px"><div class="field-lbl" style="margin-bottom:3px">Lost reason <span style="color:var(--amber)">required</span></div><select id="pending-reason" onchange="setPendingReason(this.value)"><option value="">Pick reason</option>${EVENT_LOST_REASONS.map(r=>`<option value="${esc(r)}"${pending.reason===r?' selected':''}>${esc(r)}</option>`).join('')}</select></div>`:''}
         <div id="swap-chip-slot">${swapChipHtml}</div>
         ${pending.outcome?`<button class="btn-ghost" onclick="clearPendingOutcome()" style="width:100%;font-size:12px;margin-top:6px">Clear outcome</button>`:''}
@@ -2934,13 +2946,15 @@ function liveCallOutcome(value){
 }
 function parseLiveCallHistory(history,latest){
   const entries=[];
-  String(history||'').split(/\s+\|\s+/).forEach(part=>{
-    const m=part.trim().match(/^(\d{4}-\d{2}-\d{2})\s+[^:|]+:\s+(\d{1,2}\/\d{1,2})\s+(\d{1,2}:\d{2})\s*-\s*([^\-]+?)\s*-\s*([\s\S]+)$/);
+  [history,latest].forEach(source=>String(source||'').split(/\s+\|\s+/).forEach(part=>{
+    const m=part.trim().match(/(?:^|:\s*|\s)(\d{1,2}\/\d{1,2})(?:\/\d{2,4})?\s+(\d{1,2}:\d{2})\s*-\s*([^\-]+?)\s*-\s*([\s\S]+)$/);
     if(!m)return;
-    const outcome=liveCallOutcome(m[4].replace(/\s+\[(?:DM|GK)\]$/i,''));
-    const note=cleanLiveCallText(m[5]);
-    if(outcome&&note)entries.push({dmy:m[2],hm:m[3],outcome,text:note,registryReadOnly:true});
-  });
+    const rawOutcome=m[3].replace(/\s+\[(?:DM|GK)\]$/i,'').trim();
+    if(!/^(?:VM|NA|VOICEMAIL|NO ANSWER|CALLBACK|AWAITING CALLBACK|CONTACTED|REACHED|NOTE|EMAIL|EMAILED|GMAIL SENT|CUSTOMER EMAIL REPLY|HOT|NOT INT\.|NOT INTERESTED|DEAD AIR|PROVIDER REJECT)$/i.test(rawOutcome))return;
+    const outcome=liveCallOutcome(rawOutcome)||rawOutcome;
+    const note=cleanLiveCallText(m[4]);
+    if(note)entries.push({dmy:m[1],hm:m[2],outcome,text:note,registryReadOnly:true});
+  }));
   const recent=String(latest||'').match(/^(\d{4})-(\d{2})-(\d{2})\s*·\s*(\d{2}:\d{2})(?::\d{2})?\s*·\s*([^·]+?)\s*·\s*([\s\S]+)$/);
   if(recent){
     const outcome=liveCallOutcome(recent[5]);
@@ -3858,6 +3872,12 @@ function setPendingReason(v){
   const l=filtered[idx];if(!l)return;
   if(!l.pending)l.pending={outcome:'',text:'',callStartTs:0,editedHm:'',reason:'',speakerRole:''};
   l.pending.reason=v;
+  save();renderCard();
+}
+function setPendingNextAction(v){
+  const l=filtered[idx];if(!l)return;
+  if(!l.pending)l.pending={outcome:'',text:'',callStartTs:0,editedHm:''};
+  l.pending.nextAction=['CALL','EMAIL','WAIT','NONE'].includes(v)?v:'';
   save();renderCard();
 }
 function commitPending(){

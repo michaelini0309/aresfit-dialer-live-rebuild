@@ -77,7 +77,8 @@ function logActivityForSignedInUser(request) {
   const outcome = String(p.outcome || '').trim();
   const channel = String(p.channel || 'call').trim();
   const note = String(p.note_text || '').trim();
-  const storedNote = 'AresFit dialer event: ' + note;
+  const storedNote = note;
+  const nextAction = normalise_(p.next_action);
   const allowedOutcomes = ['reached','no answer','voicemail','dead air','email sent','reply received','quote sent','quote needed','supplier needed','customer waiting','parked','lost','do not touch','HOLD','app issue'];
   const allowedChannels = ['call','email','WhatsApp','quote','supplier','Shopify','blocker','app issue'];
   if (!siteId || siteId.length > 80) throw new Error('A valid Global_Site_ID is required.');
@@ -85,6 +86,7 @@ function logActivityForSignedInUser(request) {
   if (!allowedOutcomes.includes(outcome)) throw new Error('Choose a supported activity outcome.');
   if (!allowedChannels.includes(channel)) throw new Error('Choose a supported activity type.');
   if (!note || note.length > 2000) throw new Error('A call note of 1–2,000 characters is required.');
+  if (!['','CALL','EMAIL','WAIT','NONE'].includes(nextAction)) throw new Error('Next action is invalid.');
   const nextActionDate = String(p.next_action_date || '').trim();
   if (nextActionDate && !/^\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2})?$/.test(nextActionDate)) throw new Error('Follow-up date must be YYYY-MM-DD or YYYY-MM-DD HH:MM.');
   const lock = LockService.getScriptLock();
@@ -120,7 +122,10 @@ function logActivityForSignedInUser(request) {
     for (let i=0; i<oldRows.length; i++) {
       if (String(oldRows[i][hh.Event_ID]).trim() === eventId) {
         if (String(oldRows[i][hh.Global_Site_ID]).trim() !== siteId) throw new Error('Event ID already belongs to another lead.');
-        if (String(oldRows[i][hh.Outcome]).trim() !== outcome || String(oldRows[i][hh.Note_Text]).trim() !== storedNote || String(oldRows[i][hh.Follow_Up_Date] || '').trim() !== nextActionDate) throw new Error('Event ID was already used with different activity details.');
+        const priorNote = String(oldRows[i][hh.Note_Text]).trim();
+        if (String(oldRows[i][hh.Outcome]).trim() !== outcome ||
+            (priorNote !== storedNote && priorNote !== 'AresFit dialer event: '+storedNote) ||
+            String(oldRows[i][hh.Follow_Up_Date] || '').trim() !== nextActionDate) throw new Error('Event ID was already used with different activity details.');
         duplicateRow = i+4;
       }
       if (String(oldRows[i][hh.Global_Site_ID]).trim() === siteId && normalise_(oldRows[i][hh.Is_Latest_Event]) === 'YES') demoteRows.push(i+4);
@@ -129,7 +134,7 @@ function logActivityForSignedInUser(request) {
     if (duplicateRow) {
       demoteRows.forEach(r => { if (r !== duplicateRow) history.getRange(r,hh.Is_Latest_Event+1).setValue('NO'); });
       if (normalise_(oldRows[duplicateRow-4][hh.Is_Latest_Event]) !== 'YES') history.getRange(duplicateRow,hh.Is_Latest_Event+1).setValue('YES');
-      persistLatestLeadState_(registry,lead.row,h,historyRowLatestNote_(dateKey_(oldRows[duplicateRow-4][hh.Event_Date]),String(oldRows[duplicateRow-4][hh.Event_Time]||''),outcome,storedNote),String(oldRows[duplicateRow-4][hh.Event_Date]||''),String(oldRows[duplicateRow-4][hh.Follow_Up_Date]||''),outcome,channel,user.name);
+      persistLatestLeadState_(registry,lead.row,h,historyRowLatestNote_(dateKey_(oldRows[duplicateRow-4][hh.Event_Date]),String(oldRows[duplicateRow-4][hh.Event_Time]||''),outcome,storedNote),String(oldRows[duplicateRow-4][hh.Event_Date]||''),String(oldRows[duplicateRow-4][hh.Follow_Up_Date]||''),outcome,channel,user.name,nextAction,lead.values);
       return {ok:true, duplicate:true, event_id:eventId, global_site_id:siteId};
     }
 
@@ -158,7 +163,7 @@ function logActivityForSignedInUser(request) {
     // Event_ID is checked under the script lock before this point.
     history.getRange(appendRow,1,1,historyLastCol).setValues([values]);
     demoteRows.forEach(r => history.getRange(r,hh.Is_Latest_Event+1).setValue('NO'));
-    persistLatestLeadState_(registry,lead.row,h,historyRowLatestNote_(date,time,outcome,storedNote),date,nextActionDate,outcome,channel,user.name);
+    persistLatestLeadState_(registry,lead.row,h,historyRowLatestNote_(date,time,outcome,storedNote),date,nextActionDate,outcome,channel,user.name,nextAction,lead.values);
     return {ok:true, duplicate:false, event_id:eventId, global_site_id:siteId, timestamp:isoNow_()};
   } finally {
     lock.releaseLock();
@@ -169,8 +174,21 @@ function historyRowLatestNote_(date,time,outcome,note) {
   return [date, time, outcome, note].filter(Boolean).join(' · ');
 }
 
-function persistLatestLeadState_(registry,rowNumber,h,latestNote,eventDate,nextActionDate,outcome,channel,repName) {
+function persistLatestLeadState_(registry,rowNumber,h,latestNote,eventDate,nextActionDate,outcome,channel,repName,nextAction,priorRowValues) {
   const setIfPresent = (name,value) => { if (h[name] != null) registry.getRange(rowNumber,h[name]+1).setValue(value); };
+  // Keep the previous registry context before replacing the latest-note cell.
+  // Retried event IDs must not append the same text a second time.
+  if (h.Rep_Contact_History != null && h.Latest_Real_Notes != null) {
+    const historyCell = registry.getRange(rowNumber,h.Rep_Contact_History+1);
+    const prior = priorRowValues || [];
+    let history = String(prior[h.Rep_Contact_History] || '');
+    const previousHistory = history;
+    const previousLatest = String(prior[h.Latest_Real_Notes] || '');
+    [previousLatest,latestNote].forEach(part => {
+      if (part && !history.includes(part)) history += (history ? ' | ' : '') + part;
+    });
+    if (history !== previousHistory) historyCell.setValue(history);
+  }
   setIfPresent('Latest_Real_Notes',latestNote);
   setIfPresent('Latest_Activity_Date',eventDate);
   setIfPresent('Latest_Activity_Type',channel === 'call' ? 'CALL' : channel.toUpperCase());
@@ -179,6 +197,18 @@ function persistLatestLeadState_(registry,rowNumber,h,latestNote,eventDate,nextA
   setIfPresent('Last_Touched_By',repName);
   setIfPresent('Last_Touched_Date',eventDate);
   setIfPresent('Last_Registry_Update',isoNow_());
+  // A fresh activity makes any earlier queue explanation stale.
+  setIfPresent('Michael_Next_Action','');
+  setIfPresent('Michael_Call_Reason','');
+  setIfPresent('Michael_Reason_Event_Date','');
+  if (nextAction === 'CALL') {
+    setIfPresent('Michael_Next_Action','CALL');
+    setIfPresent('Michael_Call_Reason','A follow-up call was selected after the latest activity. Check the dated note for context.');
+    setIfPresent('Michael_Reason_Event_Date',eventDate);
+  } else if (['EMAIL','WAIT','NONE'].includes(nextAction)) {
+    setIfPresent('Michael_Next_Action',nextAction);
+    setIfPresent('Michael_Reason_Event_Date',eventDate);
+  }
   if (outcome === 'do not touch') {
     setIfPresent('Suppression_Status','YES');
     setIfPresent('Current_Callability_State','NOT_CALLABLE');
@@ -236,6 +266,7 @@ function getAssignedQueue_(user, limit, snapshotIds, offset) {
   const all = [];
   const byId = {};
   const today = Utilities.formatDate(new Date(),'Europe/London','yyyy-MM-dd');
+  const nowTime = Utilities.formatDate(new Date(),'Europe/London','HH:mm');
   const stoppedIds = getLatestStoppedSiteIds_();
   const reviewedQueue = getReviewedQueue_();
   for (let i = 1; i < values.length; i++) {
@@ -243,9 +274,6 @@ function getAssignedQueue_(user, limit, snapshotIds, offset) {
     if (normalise_(row[h.Current_Owner]) !== ownerName) continue;
     const queueItem = reviewedQueue[String(row[h.Global_Site_ID] || '').trim()];
     if (queueItem && queueItem.lane === 'HOLD') continue;
-    if (queueItem && queueItem.lane === 'CALL' &&
-        (queueItem.registryVersion !== String(row[h.Last_Registry_Update] || '').trim() ||
-         queueItem.activityDate !== String(row[h.Latest_Activity_Date] || '').trim())) continue;
     const suppression = normalise_(row[h.Suppression_Status]);
     const allowedSuppression = ['', 'NO', 'CLEAR', 'NONE'];
     if (!allowedSuppression.includes(suppression)) continue;
@@ -268,29 +296,30 @@ function getAssignedQueue_(user, limit, snapshotIds, offset) {
       ownership_conflict: value_(row,h,'Ownership_Conflict_Status'),
       latest_notes: value_(row,h,'Latest_Real_Notes'),
       contact_history: value_(row,h,'Rep_Contact_History'),
+      website: value_(row,h,'Website'),
+      intent_level: value_(row,h,'Lead_Intent_Level'),
+      next_action: value_(row,h,'Michael_Next_Action'),
+      call_reason: value_(row,h,'Michael_Call_Reason'),
+      reason_event_date: value_(row,h,'Michael_Reason_Event_Date'),
       callback_date: value_(row,h,'Callback_Date'),
       follow_up_date: value_(row,h,'Follow_Up_Date'),
       latest_activity_date: value_(row,h,'Latest_Activity_Date')
     };
     if (!lead.global_site_id) continue;
     const callability = normalise_(lead.callability);
-    if (stoppedIds[lead.global_site_id] || callability === 'NOT_CALLABLE' || callability === 'DO_NOT_CALL' || callability.startsWith('NOT_CALL_READY') || callability.startsWith('BLOCKED')) continue;
+    if (stoppedIds[lead.global_site_id] || callability === 'NOT_CALLABLE' || callability === 'DO_NOT_CALL' || callability === 'EMAIL_ACTION_REQUIRED' || callability === 'WAITING_ON_DM_CALLBACK' || callability.startsWith('NOT_CALL_READY') || callability.startsWith('BLOCKED')) continue;
     if ((normalise_(lead.manual_review) === 'YES' && !(queueItem && queueItem.lane === 'CALL')) ||
         normalise_(lead.provider_reject) === 'YES' || normalise_(lead.no_gym) === 'YES' || normalise_(lead.ownership_conflict) === 'YES') continue;
     if (['RESEARCH_HOLD','BOYS_POOL_AVAILABLE_NOT_CALL_READY','OWNERSHIP_CONFLICT_QUARANTINE'].includes(normalise_(lead.master_category))) continue;
     if (normalise_(lead.lifecycle_status) === 'CLOSED_LOST' || normalise_(lead.closed_lost) === 'YES') continue;
     if (['LOST','NOT INTERESTED','NOT INT.','PERMANENT CLOSURE CONFIRMED'].includes(normalise_(lead.latest_outcome)) || normalise_(lead.activity_status) === 'PERMANENT CLOSURE CONFIRMED') continue;
-    const callback = dateKey_(lead.callback_date);
-    const followup = dateKey_(lead.follow_up_date);
-    const due = callback && callback <= today ? callback : followup && followup <= today ? followup : '';
-    const lastOutcome = normalise_(lead.latest_outcome);
-    if (queueItem && queueItem.lane === 'CALL') {
-      if (queueItem.due && dateKey_(queueItem.due) > today) continue;
-      lead._rank = queueItem.priority;
-    } else if (['UNCALLED','NEW'].includes(normalise_(lead.activity_status))) lead._rank = 3000;
-    else if (/^(VM|NA|VOICEMAIL|NO ANSWER)/.test(lastOutcome)) lead._rank = 5000;
-    else lead._rank = 4000;
-    lead._sortDate = queueItem && queueItem.lane === 'CALL' ? queueItem.due || '9999-99-99' : due || '9999-99-99';
+    const signal = queueSignal_(lead,queueItem,today,nowTime);
+    if (!signal) continue;
+    lead.queue_reason = signal.reason;
+    lead.queue_reason_date = signal.sourceDate;
+    lead.queue_lane = signal.lane;
+    lead._rank = signal.rank;
+    lead._sortDate = signal.sortDate;
     all.push(lead); byId[lead.global_site_id]=lead;
   }
   all.sort((a,b) => a._rank-b._rank || a._sortDate.localeCompare(b._sortDate) || a.global_site_id.localeCompare(b.global_site_id));
@@ -300,6 +329,123 @@ function getAssignedQueue_(user, limit, snapshotIds, offset) {
   const leads = queueIds.slice(start,start+limit).map(id=>byId[id]).filter(Boolean);
   leads.forEach(l => { delete l._rank; delete l._sortDate; });
   return {total:total,leads:leads,next_cursor:start+limit<total?String(start+limit):'',queue_ids:queueIds};
+}
+
+function queueDays_(from,to) {
+  const a = Date.parse(dateKey_(from)+'T00:00:00Z');
+  const b = Date.parse(dateKey_(to)+'T00:00:00Z');
+  return Number.isFinite(a) && Number.isFinite(b) ? Math.round((b-a)/86400000) : 9999;
+}
+
+function recentMissStreak_(notes) {
+  let count = 0;
+  const parts = String(notes || '').split(/\s+\|\s+/);
+  for (let i=parts.length-1; i>=0; i--) {
+    const part = parts[i].trim();
+    if (!/^\d{1,2}\/\d{1,2}\s+\d{1,2}:\d{2}\s*-/.test(part)) continue;
+    if (/^\d{1,2}\/\d{1,2}\s+\d{1,2}:\d{2}\s*-\s*(?:VM|NA|VOICEMAIL|NO ANSWER)\b/i.test(part)) count++;
+    else break;
+  }
+  return count;
+}
+
+function recentRoute_(notes,today) {
+  const parts = String(notes || '').split(/\s+\|\s+/);
+  for (let i=parts.length-1; i>=0; i--) {
+    const m = parts[i].match(/(\d{1,2})\/(\d{1,2})\s+\d{1,2}:\d{2}\s*-\s*(?:CALLBACK|CONTACTED)(?:\s+\[(?:DM|GK)\])?\s*-\s*(.+)$/i);
+    if (!m) continue;
+    const date = today.slice(0,4)+'-'+('0'+m[2]).slice(-2)+'-'+('0'+m[1]).slice(-2);
+    if (queueDays_(date,today) > 30 || queueDays_(date,today) < 0) continue;
+    const detail = String(m[3] || '').trim();
+    if (/\b(?:email instead|best.*email|do not call|not interested)\b/i.test(detail)) return null;
+    if (!/\b(?:DM|DECISION MAKER|OWNER|MANAGER|CALL BACK|RING BACK|AVAILABLE|IN THE CLUB|IN TOMORROW)\b/i.test(detail)) continue;
+    if (/\b(?:fuck|cunt|nigga|faggot)\b/i.test(detail)) return {date,detail:''};
+    return {date,detail:detail.slice(0,170)};
+  }
+  return null;
+}
+
+function queueSignal_(lead,queueItem,today,nowTime) {
+  const age = queueDays_(lead.latest_activity_date,today);
+  const outcome = normalise_(lead.latest_outcome);
+  const status = normalise_(lead.activity_status);
+  const category = normalise_(lead.master_category);
+  const action = normalise_(lead.next_action);
+  const sourceDate = dateKey_(lead.latest_activity_date);
+  const lastText = String(lead.latest_outcome || '').toLowerCase();
+  const lastNote = String(lead.latest_notes || '').split(/\s+\|\s+/).pop() || '';
+  const miss = /^(?:VM|NA|VOICEMAIL|NO ANSWER)\b/.test(outcome) || ['VOICEMAIL','NO ANSWER'].includes(status);
+  if (/\b(?:PROVIDER REJECT|NOT INTERESTED|DO NOT CALL|PERMANENT CLOSURE)\b/.test(outcome+' '+status) ||
+      /\b(?:HOLD|PARKED|AWAITING REPLY|EMAIL SENT|DNC)\b/.test(status)) return null;
+  const blockedText = /(?:email first|best (?:form|way) of contact is (?:via )?email|asked (?:me|us) to (?:send|email)|quote (?:send )?paused|supplier agreement hold|customer will reach out|not looking for anything|wait for (?:lee|customer|supplier))/i.test(lastText);
+  const disqualifiedNote = /(?:permanently? closed|closed forever|permanent closure|not a gym|no gym|do not call|\bDNC\b|not interested|no longer operating|closed down)/i.test(lastNote);
+  const needsNumberReview = /(?:research flag|new number|number needs (?:checking|updating))/i.test(lastNote);
+  const testEvent = /(?:aresfit dialer event:\s*test\b|^test (?:note|log|logging)\b)/i.test(lead.latest_notes);
+  if (['EMAIL','WAIT','NONE','HOLD'].includes(action) || blockedText || disqualifiedNote || needsNumberReview || testEvent) return null;
+  if (queueItem && queueItem.lane === 'HOLD') return null;
+
+  // Explicit next actions are valid only against the same source activity.
+  if (action === 'CALL' && lead.call_reason &&
+      dateKey_(lead.reason_event_date) === sourceDate && age <= 21 && !miss) {
+    const explicitDueText = lead.callback_date || lead.follow_up_date;
+    const explicitDue = dateKey_(explicitDueText);
+    if (explicitDue && explicitDue > today) return null;
+    if (!explicitDue && age < 1) return null;
+    const time = String(explicitDueText).match(/(?:T|\s)(\d{2}:\d{2})/);
+    const laterToday = explicitDue === today && time && time[1] > nowTime;
+    return {lane:laterToday?'LATER_TODAY':'FOLLOW_UP',rank:laterToday?3500:1000,
+      sortDate:explicitDue || sourceDate,
+      reason:lead.call_reason,sourceDate};
+  }
+
+  const dueText = lead.callback_date || lead.follow_up_date;
+  const due = dateKey_(dueText);
+  const daysPastDue = queueDays_(due,today);
+  const callbackEvidence = /CALLBACK|CALL BACK|DM AVAILABLE|RING BACK/.test(outcome+' '+status);
+  if (callbackEvidence && age <= 14 && due && daysPastDue >= 0 && daysPastDue <= 3 &&
+      (!sourceDate || due >= sourceDate)) {
+    const time = String(dueText).match(/(?:T|\s)(\d{2}:\d{2})/);
+    const laterToday = due === today && time && time[1] > nowTime;
+    return {lane:laterToday?'LATER_TODAY':'DUE',rank:laterToday?3500:1500,
+      sortDate:due+' '+(time ? time[1] : '00:00'),
+      reason:laterToday?'Decision-maker callback due later today at '+time[1]+'.':'Recent decision-maker callback is due.',
+      sourceDate};
+  }
+
+  if (!miss && age <= 21 && normalise_(lead.intent_level) === 'ACTIVE_OPPORTUNITY' &&
+      /CONTACTED|REACHED|CALLBACK/.test(outcome+' '+status) &&
+      /\b(?:INTERESTED|EQUIPMENT|REPLACEMENT|BUDGET|PRICING|BUYING|NEEDS? KIT)\b/.test(outcome) &&
+      !/QUOTE|EMAIL|SUPPLIER|BLOCKED|WAITING|NOT INTERESTED/.test(outcome+' '+status)) {
+    return {lane:'FOLLOW_UP',rank:2000,sortDate:sourceDate,
+      reason:'Recent buyer conversation needs a follow-up call; check the dated notes before dialing.',sourceDate};
+  }
+
+  if (miss && age >= 3 && age <= 21) {
+    const streak = recentMissStreak_(lead.latest_notes);
+    if (streak >= 4 && age < 10) return null;
+    const route = recentRoute_(lead.latest_notes,today);
+    const targeted = route && streak < 3;
+    const namedBuyerRoute = targeted && /\b(?:DM|DECISION MAKER|OWNER)\b/i.test(route.detail);
+    return {lane:'RETRY',rank:targeted ? 2900+(namedBuyerRoute?0:120)+Math.min(2,streak)*150+Math.abs(age-5)*5 : streak >= 3 ? 5500 : 4500+Math.abs(age-7)*5,
+      sortDate:sourceDate,
+      reason:targeted ? 'Earlier decision-maker route ('+route.date+'): '+(route.detail || 'see the original call note')+'. Latest call did not connect; confirm the route still applies.' :
+        streak >= 3 ? 'Several missed attempts; retry only after a longer gap.' : 'A recent call did not connect; retry after a sensible gap. No current buyer signal is recorded.',sourceDate};
+  }
+
+  // Cold volume requires an identifiable gym and a usable contact route.
+  // A name or an old priority label alone is not a buyer signal.
+  const coldStatus = ['UNCALLED','NEW','COLD','NOT CONTACTED'].includes(status);
+  const gymName = /\b(?:GYM|FITNESS|CROSSFIT|STRENGTH|TRAINING|HEALTH CLUB|PERFORMANCE)\b/i.test(lead.business_name);
+  const ambiguousSite = /\b(?:SCHOOL|COLLEGE|UNIVERSITY|GOLF|POOLS?|LEISURE CENTRE|SPORTS CENTRE)\b/i.test(lead.business_name);
+  const usablePhone = /^0\d{9,10}$/.test(String(lead.phone || '').replace(/\D/g,''));
+  const priorCall = /\b\d{1,2}\/\d{1,2}\s+\d{1,2}:\d{2}\s*-\s*(?:VM|NA|CONTACTED|CALLBACK|DEAD AIR|NOT INT\.)\b/i.test(lead.latest_notes+' | '+lead.contact_history);
+  if (coldStatus && gymName && !ambiguousSite && usablePhone && lead.website &&
+      !priorCall &&
+      ['UNRESOLVED','HISTORICAL_ONLY','MICHAEL ACTIVE/TOUCHED ADDENDUM'].includes(category)) {
+    return {lane:'COLD',rank:category === 'UNRESOLVED' ? 3250 : 4800,sortDate:lead.global_site_id,
+      reason:'Cold gym candidate with a phone and website; no current buying signal is recorded.',sourceDate};
+  }
+  return null;
 }
 
 function getReviewedQueue_() {
