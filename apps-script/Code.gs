@@ -229,7 +229,7 @@ function getAssignedQueue_(user, limit, snapshotIds, offset) {
   const values = sheet.getRange(CONFIG.HEADER_ROW, 1, lastRow - CONFIG.HEADER_ROW + 1, lastCol).getDisplayValues();
   const headers = values[0];
   const h = headerIndex_(headers);
-  ['Global_Site_ID','Current_Owner','Suppression_Status','Business_Name'].forEach(k => {
+  ['Global_Site_ID','Current_Owner','Suppression_Status','Business_Name','Last_Registry_Update','Latest_Activity_Date'].forEach(k => {
     if (h[k] == null) throw new Error('Registry is missing required column: ' + k);
   });
   const ownerName = normalise_(user.name);
@@ -237,9 +237,15 @@ function getAssignedQueue_(user, limit, snapshotIds, offset) {
   const byId = {};
   const today = Utilities.formatDate(new Date(),'Europe/London','yyyy-MM-dd');
   const stoppedIds = getLatestStoppedSiteIds_();
+  const reviewedQueue = getReviewedQueue_();
   for (let i = 1; i < values.length; i++) {
     const row = values[i];
     if (normalise_(row[h.Current_Owner]) !== ownerName) continue;
+    const queueItem = reviewedQueue[String(row[h.Global_Site_ID] || '').trim()];
+    if (queueItem && queueItem.lane === 'HOLD') continue;
+    if (queueItem && queueItem.lane === 'CALL' &&
+        (queueItem.registryVersion !== String(row[h.Last_Registry_Update] || '').trim() ||
+         queueItem.activityDate !== String(row[h.Latest_Activity_Date] || '').trim())) continue;
     const suppression = normalise_(row[h.Suppression_Status]);
     const allowedSuppression = ['', 'NO', 'CLEAR', 'NONE'];
     if (!allowedSuppression.includes(suppression)) continue;
@@ -255,6 +261,11 @@ function getAssignedQueue_(user, limit, snapshotIds, offset) {
       latest_outcome: value_(row,h,'Latest_Activity_Outcome'),
       closed_lost: value_(row,h,'Closed_Lost_Status'),
       callability: value_(row,h,'Current_Callability_State'),
+      master_category: value_(row,h,'Current_Master_Category'),
+      manual_review: value_(row,h,'Manual_Review_Required'),
+      provider_reject: value_(row,h,'Provider_Reject_Status'),
+      no_gym: value_(row,h,'No_Gym_Status'),
+      ownership_conflict: value_(row,h,'Ownership_Conflict_Status'),
       latest_notes: value_(row,h,'Latest_Real_Notes'),
       contact_history: value_(row,h,'Rep_Contact_History'),
       callback_date: value_(row,h,'Callback_Date'),
@@ -262,20 +273,23 @@ function getAssignedQueue_(user, limit, snapshotIds, offset) {
       latest_activity_date: value_(row,h,'Latest_Activity_Date')
     };
     if (!lead.global_site_id) continue;
-    if (stoppedIds[lead.global_site_id] || normalise_(lead.callability) === 'NOT_CALLABLE') continue;
+    const callability = normalise_(lead.callability);
+    if (stoppedIds[lead.global_site_id] || callability === 'NOT_CALLABLE' || callability === 'DO_NOT_CALL' || callability.startsWith('NOT_CALL_READY') || callability.startsWith('BLOCKED')) continue;
+    if (normalise_(lead.manual_review) === 'YES' || normalise_(lead.provider_reject) === 'YES' || normalise_(lead.no_gym) === 'YES' || normalise_(lead.ownership_conflict) === 'YES') continue;
+    if (['RESEARCH_HOLD','BOYS_POOL_AVAILABLE_NOT_CALL_READY','OWNERSHIP_CONFLICT_QUARANTINE'].includes(normalise_(lead.master_category))) continue;
     if (normalise_(lead.lifecycle_status) === 'CLOSED_LOST' || normalise_(lead.closed_lost) === 'YES') continue;
     if (['LOST','NOT INTERESTED','NOT INT.','PERMANENT CLOSURE CONFIRMED'].includes(normalise_(lead.latest_outcome)) || normalise_(lead.activity_status) === 'PERMANENT CLOSURE CONFIRMED') continue;
     const callback = dateKey_(lead.callback_date);
     const followup = dateKey_(lead.follow_up_date);
-    const callability = normalise_(lead.callability);
-    // Rank explicit due dates first. Registry callability labels are shown as
-    // historical evidence; this ranking does not certify TPS/CTPS compliance.
-    if (callback && callback <= today) lead._rank = callback < today ? 0 : 1;
-    else if (followup && followup <= today) lead._rank = followup < today ? 2 : 3;
-    else if (['CALL_READY_SUPPORTED_BY_HISTORY','CALL_READY_SUPPORTED_BY_ACTIVITY'].includes(callability)) lead._rank = 4;
-    else if (callback || followup) lead._rank = 5;
-    else lead._rank = 6;
-    lead._sortDate = callback && callback <= today ? callback : (followup || callback || '9999-99-99');
+    const due = callback && callback <= today ? callback : followup && followup <= today ? followup : '';
+    const lastOutcome = normalise_(lead.latest_outcome);
+    if (queueItem && queueItem.lane === 'CALL') {
+      if (queueItem.due && dateKey_(queueItem.due) > today) continue;
+      lead._rank = queueItem.priority;
+    } else if (['UNCALLED','NEW'].includes(normalise_(lead.activity_status))) lead._rank = 3000;
+    else if (/^(VM|NA|VOICEMAIL|NO ANSWER)/.test(lastOutcome)) lead._rank = 5000;
+    else lead._rank = 4000;
+    lead._sortDate = queueItem && queueItem.lane === 'CALL' ? queueItem.due || '9999-99-99' : due || '9999-99-99';
     all.push(lead); byId[lead.global_site_id]=lead;
   }
   all.sort((a,b) => a._rank-b._rank || a._sortDate.localeCompare(b._sortDate) || a.global_site_id.localeCompare(b.global_site_id));
@@ -285,6 +299,30 @@ function getAssignedQueue_(user, limit, snapshotIds, offset) {
   const leads = queueIds.slice(start,start+limit).map(id=>byId[id]).filter(Boolean);
   leads.forEach(l => { delete l._rank; delete l._sortDate; });
   return {total:total,leads:leads,next_cursor:start+limit<total?String(start+limit):'',queue_ids:queueIds};
+}
+
+function getReviewedQueue_() {
+  const sheet = getSheet_('Michael Call Queue');
+  const values = sheet.getDataRange().getDisplayValues();
+  if (!values.length) throw new Error('Michael Call Queue is empty.');
+  const h = headerIndex_(values[0]);
+  ['Global_Site_ID','Lane','Priority','Due_At','Registry_Version','Activity_Date_At_Review'].forEach(k => {
+    if (h[k] == null) throw new Error('Michael Call Queue is missing required column: ' + k);
+  });
+  const queue = {};
+  for (let i = 1; i < values.length; i++) {
+    const row = values[i];
+    const id = String(row[h.Global_Site_ID] || '').trim();
+    if (!id) continue;
+    if (queue[id]) throw new Error('Michael Call Queue contains duplicate ID: ' + id);
+    const lane = normalise_(row[h.Lane]);
+    const priority = Number(row[h.Priority]);
+    if (lane === 'CALL' && (!Number.isInteger(priority) || priority < 1)) throw new Error('Michael Call Queue priority is invalid at row ' + (i+1));
+    const due = String(row[h.Due_At] || '').trim();
+    if (due && !dateKey_(due)) throw new Error('Michael Call Queue due date is invalid at row ' + (i+1));
+    queue[id] = {lane, priority:lane === 'CALL' ? priority : 9999, due, registryVersion:String(row[h.Registry_Version] || '').trim(), activityDate:String(row[h.Activity_Date_At_Review] || '').trim()};
+  }
+  return queue;
 }
 
 function getLatestStoppedSiteIds_() {
