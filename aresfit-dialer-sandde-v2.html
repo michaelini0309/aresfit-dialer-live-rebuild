@@ -540,7 +540,7 @@ body.light-mode .number-research-link{border-color:rgba(13,107,42,.42);backgroun
       <button type="button" class="setup-dd-btn" id="setup-preset-button" aria-expanded="false" aria-controls="setup-preset-menu" onclick="toggleSetupPreset(event)"><span id="setup-preset-label">Choose preset</span><span class="setup-dd-caret">v</span></button>
       <div class="setup-dd-menu" id="setup-preset-menu">
         <button type="button" class="setup-dd-opt" data-name="Sandde" data-email="info@aresfit.co.uk" onclick="applySetupPreset(this)">Sandde</button>
-        <button type="button" class="setup-dd-opt" data-name="Ioan" data-email="ioan@aresfit.co.uk" onclick="applySetupPreset(this)">Ioan</button>
+        <button type="button" class="setup-dd-opt" data-name="Krzysztof" data-email="krzysztof@aresfit.co.uk" onclick="applySetupPreset(this)">Krzysztof</button>
         <button type="button" class="setup-dd-opt" data-name="Michael" data-email="michael@aresfit.co.uk" onclick="applySetupPreset(this)">Michael</button>
         <button type="button" class="setup-dd-opt" data-custom="true" onclick="applySetupPreset(this)">Custom</button>
       </div>
@@ -951,8 +951,8 @@ body.light-mode .number-research-link{border-color:rgba(13,107,42,.42);backgroun
    ============================================================ */
 
 // ===== Config / constants =====
-const APP_BUILD = '2026.08.25.2';
-const RELEASE_ID = '20260825-owr-001-mobile-sticky-r1';
+const APP_BUILD = '2026.09.29.1';
+const RELEASE_ID = '20260929-rep-queue-repair';
 const ROLLBACK_BASE_COMMIT = '1d0df30528684ff7acb277dbc7258e4a626766f1';
 const EXPORT_SCHEMA_VERSION = 'AresFit-22-column-v1';
 const CIRCLELOOP_ANDROID_PACKAGE = 'com.circleloop';
@@ -1804,7 +1804,7 @@ function loadEventLog(){try{const rows=JSON.parse(localStorage.getItem(EVENT_LOG
 function saveEventLog(){try{localStorage.setItem(EVENT_LOG_STORAGE_KEY,JSON.stringify(eventLog));return true}catch(e){return false}}
 const LIVE_OUTBOX_KEY='aresfit_live_registry_outbox_v1';
 const liveBridgeNonce=(location.hash.match(/(?:^#|&)aresfit-bridge=([^&]+)/)||[])[1]||'';
-let liveParentOrigin='',liveBridgeResolve=null,liveBridgeReady=false,liveQueueLoading=false,liveSyncBusy=false,liveNextCursor='';
+let liveParentOrigin='',liveBridgeResolve=null,liveBridgeReady=false,liveQueueLoading=false,liveSyncBusy=false,liveNextCursor='',liveQueueCursor='',liveSenderConfirmed=false,liveDueTimer=null,liveNextDueAt='';
 const liveRequests=new Map();
 const liveBridgeReadyPromise=new Promise(resolve=>{liveBridgeResolve=resolve});
 function hasLiveBridge(){return window.parent!==window&&!!liveBridgeNonce}
@@ -1905,6 +1905,7 @@ function saveSetup(){
   const e=document.getElementById('setup-email').value.trim();
   if(!e){alert('Email required');return}
   user={name:n,email:e};
+  liveSenderConfirmed=true;
   try{localStorage.setItem(SETUP_KEY,JSON.stringify(user))}catch(err){console.warn('localStorage blocked in this preview - settings kept in memory only',err)}
   document.getElementById('setup-modal').style.display='none';
   if(!leads.length){
@@ -2408,6 +2409,7 @@ function completeImport(fromLive=false,selectedId=null){
       leadId:String(r.Global_Site_ID||r.Lead_ID||'').trim()
     };
     if(fromLive){
+      o.queueLane=String(r.Registry_Queue_Lane||'');
       o.queueReason=String(r.Registry_Queue_Reason||'').trim();
       o.queueReasonDate=String(r.Registry_Queue_Reason_Date||'').trim();
       o.originalRegistryNotes=String(r.Registry_Latest_Note||'').trim();
@@ -2483,48 +2485,76 @@ function setLiveLoading(show){const overlay=document.getElementById('live-loadin
 
 function liveRawRows(items){return items.map(l=>({
   'FINAL PRIORITY':'','Business Name':l.business_name||'','Phone':l.phone||'','Website':l.website||'',
-  'Status':STATUS_OPTS.includes(l.activity_status)?l.activity_status:'',
+  'Status':l.queue_lane==='DUE'?'Callback':STATUS_OPTS.includes(l.activity_status)?l.activity_status:'',
   'Stage':STAGE_OPTS.includes(l.lifecycle_status)?l.lifecycle_status:'',
   'Notes':l.latest_notes||'','Registry_Latest_Note':l.latest_notes||'',
   'Registry_Contact_History':l.contact_history||'',
   'Registry_Queue_Reason':l.queue_reason||'',
   'Registry_Queue_Reason_Date':l.queue_reason_date||'',
+  'Registry_Queue_Lane':l.queue_lane||'',
   'Follow-up Date':l.callback_date||l.follow_up_date||'',
   'Equipment Brands':'','AresFit Brands':'','PSC / Decision Maker':l.decision_maker||'',
   'Email':l.email||'','Call Angle':'','Research Notes':'',
   'Lead_ID':l.global_site_id||'','Global_Site_ID':l.global_site_id||'',
   'Current_Callability_State':l.callability||'', 'Suppression_Status':'NO'
 }))}
-async function loadLiveQueuePage(reset=true){
+function scheduleLiveCallbacks(dueAt){
+  if(liveDueTimer)clearTimeout(liveDueTimer);
+  liveNextDueAt=dueAt||'';
+  if(!liveNextDueAt||!liveQueueCursor)return;
+  const due=parseFollowUp(liveNextDueAt);
+  if(!due)return;
+  liveDueTimer=setTimeout(()=>{
+    liveDueTimer=null;
+    if(liveQueueLoading){scheduleLiveCallbacks(liveNextDueAt);return}
+    if(!document.hidden&&liveSenderConfirmed)loadLiveQueuePage(false,true);
+  },Math.min(2147483647,Math.max(1000,due.ts-Date.now()+1000)));
+}
+async function loadLiveQueuePage(reset=true,dueOnly=false){
   if(!hasLiveBridge()){updateLiveSyncStatus('Open this dialer from the AresFit live-registry app.');return false}
+  if(!liveSenderConfirmed){setLiveLoading(false);openSetup();return false}
   if(liveQueueLoading)return false;
   liveQueueLoading=true;
-  setLiveLoading(true);
+  const firstConnection=reset&&!leads.length;
+  setLiveLoading(firstConnection);
+  const moreBtn=document.getElementById('live-next-btn');
+  if(moreBtn){moreBtn.disabled=true;moreBtn.textContent=dueOnly?'Checking due callbacks…':'Loading more leads…'}
   const loadStatus=document.getElementById('live-load-status');if(loadStatus)loadStatus.textContent='Reading assigned leads from the live registry…';
-  const selectedId=filtered[idx]?filtered[idx].id:null;
+  const selectedSiteId=filtered[idx]?getLeadId(filtered[idx]):'';
   try{
     previousImportSnapshot=createImportSnapshot();
-    const response=await liveServerCall('getQueueForSignedInUser',[reset?'':liveNextCursor]);
+    const response=await liveServerCall('getQueueForSignedInUser',[reset?'':liveQueueCursor,dueOnly]);
     if(!response||!response.ok)throw new Error(response&&response.error||'Live registry read failed.');
+    if(user.email&&response.user.email.toLowerCase()!==user.email.toLowerCase())throw new Error(`Google is signed in as ${response.user.email}. Use the Google account matching your selected sender.`);
     const incoming=liveRawRows(response.leads||[]);
     if(reset){raw=[];leads=[];idx=0;queueLeadIds=[];queueLabel='';eventLog.forEach(e=>{if(e._sync_status==='pending')queueEventForSync(e)})}
-    if(!incoming.length&&reset){if(loadStatus)loadStatus.textContent=`No assigned unsuppressed leads returned for ${response.user.name}.`;updateLiveSyncStatus('Connected to the live registry; no assigned unsuppressed leads were returned.');return false}
-    raw=reset?incoming:raw.concat(incoming);
+    const existing=new Set((reset?[]:raw).map(r=>String(r.Global_Site_ID||r.Lead_ID||'')));
+    const unique=incoming.filter(r=>{const id=String(r.Global_Site_ID||r.Lead_ID||'');if(!id||existing.has(id))return false;existing.add(id);return true});
+    const dueNew=unique.filter(r=>r.Registry_Queue_Lane==='DUE');
+    raw=reset?unique:dueNew.concat(raw,unique.filter(r=>r.Registry_Queue_Lane!=='DUE'));
     headers=FIELDS.map(f=>LABELS[f]);headers.push('Lead_ID','Global_Site_ID','Current_Callability_State','Suppression_Status');
     mapping={};FIELDS.forEach(f=>mapping[f]=LABELS[f]);
     user={name:response.user.name,email:response.user.email||''};
     if(response.user.sender_name)prefs.senderName=response.user.sender_name;
     if(response.user.sender_email)prefs.senderEmail=response.user.sender_email;
     liveNextCursor=response.next_cursor||'';
+    liveQueueCursor=response.queue_cursor||liveNextCursor;
     sourceMeta={fileName:'LIVE ARESFIT REGISTRY',rowCount:raw.length,importedAt:Date.now()};
-    const moreBtn=document.getElementById('live-next-btn');if(moreBtn)moreBtn.style.display=liveNextCursor?'block':'none';
-    if(loadStatus)loadStatus.textContent=`Signed in as ${response.user.name} · ${raw.length} loaded · ${response.total} assigned and unsuppressed`;
+    if(moreBtn)moreBtn.style.display=liveNextCursor?'block':'none';
+    if(loadStatus)loadStatus.textContent=`Signed in as ${response.user.name} · ${raw.length} loaded · ${response.remaining||0} eligible leads remaining now`;
     updateLiveSyncStatus(`Connected to the live registry as ${response.user.name}.`);
-    completeImport(true,reset?null:selectedId);
+    if(!incoming.length&&reset){scheduleLiveCallbacks(response.next_due_at);if(loadStatus)loadStatus.textContent='Connected; no eligible calls due now.';return true}
+    if(unique.length||reset){
+      completeImport(true,null);
+      const selectedIndex=filtered.findIndex(l=>getLeadId(l)===selectedSiteId);
+      if(!reset&&selectedIndex>=0){idx=selectedIndex;render()}
+    }
+    scheduleLiveCallbacks(response.next_due_at);
+    if(dueOnly&&unique.length)showToast(`${unique.length} due callback${unique.length===1?'':'s'} added to Leads.`);
     syncPendingLiveEvents();
     return true;
   }catch(error){if(loadStatus)loadStatus.textContent=`Live registry error: ${error.message}`;updateLiveSyncStatus(`Live registry connection error: ${error.message}`);showToast(`Live registry error · ${error.message}`);return false}
-  finally{liveQueueLoading=false;setLiveLoading(false)}
+  finally{liveQueueLoading=false;setLiveLoading(false);if(moreBtn){moreBtn.disabled=false;moreBtn.textContent='Load next 50 live leads'}}
 }
 
 // ===== Filters / search =====
@@ -4530,6 +4560,8 @@ async function initialiseApp(){
   document.getElementById('upload-screen').style.display='flex';
   setupModalAccessibility();
   if(liveMode){
+    liveSenderConfirmed=false;
+    setLiveLoading(false);
     const zone=document.getElementById('upload-zone');if(zone)zone.style.display='none';
     const refresh=document.getElementById('live-refresh-btn');if(refresh)refresh.style.display='block';
     const help=document.getElementById('upload-instructions');if(help)help.textContent='Your assigned leads load from the live AresFit registry. Call activity syncs back automatically.';
@@ -4553,6 +4585,13 @@ if(uz){
   uz.addEventListener('drop',ev=>processCsvFile(ev.dataTransfer.files[0]));
 }
 window.addEventListener('online',()=>syncPendingLiveEvents());
+document.addEventListener('visibilitychange',()=>{
+  if(!document.hidden&&liveNextDueAt&&liveSenderConfirmed){
+    const due=parseFollowUp(liveNextDueAt);
+    if(due&&due.ts<=Date.now())loadLiveQueuePage(false,true);
+    else scheduleLiveCallbacks(liveNextDueAt);
+  }
+});
 setInterval(()=>syncPendingLiveEvents(),60000);
 
 // Refresh block banner every 5 min in case session crosses an hour

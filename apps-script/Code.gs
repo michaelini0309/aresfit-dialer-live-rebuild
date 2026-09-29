@@ -52,21 +52,22 @@ function doGet(e) {
 // These server functions are intended to be called by google.script.run from
 // the HtmlService app. Identity is taken from Google's authenticated session,
 // never from an email string supplied by the browser.
-function getQueueForSignedInUser(afterSiteId) {
+function getQueueForSignedInUser(cursor, dueOnly) {
   const user = requireSignedInAresFitUser_();
   const cache = CacheService.getScriptCache();
-  const cacheKey = 'ARES_QUEUE_' + user.rep_id;
-  let ids, offset = 0;
-  if (afterSiteId) {
-    offset = Number(afterSiteId);
-    if (!Number.isInteger(offset) || offset < 0) throw new Error('Queue page token is invalid. Refresh the queue.');
-    const cached = cache.get(cacheKey);
-    if (!cached) throw new Error('Queue snapshot expired. Refresh the queue.');
-    ids = JSON.parse(cached);
+  const token = cursor || Utilities.getUuid();
+  if (!/^[-a-zA-Z0-9]{20,80}$/.test(token)) throw new Error('Queue session is invalid. Reconnect to the registry.');
+  const cacheKey = 'ARES_QUEUE_' + user.rep_id + '_' + token;
+  let served = [];
+  if (cursor) {
+    const saved = cache.get(cacheKey);
+    if (!saved) throw new Error('Queue session expired. Reconnect to the registry.');
+    served = JSON.parse(saved);
   }
-  const result = getAssignedQueue_(user, CONFIG.MAX_LIMIT, ids || null, offset);
-  if (!ids) cache.put(cacheKey, JSON.stringify(result.queue_ids), 21600);
-  return {ok:true, user:{name:user.name, email:user.email, rep_id:user.rep_id, sender_name:user.sender_name, sender_email:user.sender_email}, total:result.total, leads:result.leads, next_cursor:result.next_cursor};
+  const result = getAssignedQueue_(user, CONFIG.MAX_LIMIT, served, dueOnly === true);
+  const sentIds = served.concat(result.leads.map(l => l.global_site_id));
+  cache.put(cacheKey, JSON.stringify(sentIds), 21600);
+  return {ok:true, user:{name:user.name, email:user.email, rep_id:user.rep_id, sender_name:user.sender_name, sender_email:user.sender_email}, total:result.total, leads:result.leads, remaining:result.remaining, next_cursor:result.remaining ? token : '', queue_cursor:token, next_due_at:result.next_due_at};
 }
 
 function logActivityForSignedInUser(request) {
@@ -132,9 +133,15 @@ function logActivityForSignedInUser(request) {
     }
 
     if (duplicateRow) {
+      const duplicateKey = dateKey_(oldRows[duplicateRow-4][hh.Event_Date]) + ' ' + String(oldRows[duplicateRow-4][hh.Event_Time] || '');
+      const newer = oldRows.some((r,i) => String(r[hh.Global_Site_ID]).trim() === siteId &&
+        normalise_(r[hh.Context_Only]) !== 'YES' &&
+        (dateKey_(r[hh.Event_Date]) + ' ' + String(r[hh.Event_Time] || '') > duplicateKey ||
+         (dateKey_(r[hh.Event_Date]) + ' ' + String(r[hh.Event_Time] || '') === duplicateKey && i+4 > duplicateRow)));
+      if (newer) return {ok:true, duplicate:true, event_id:eventId, global_site_id:siteId};
       demoteRows.forEach(r => { if (r !== duplicateRow) history.getRange(r,hh.Is_Latest_Event+1).setValue('NO'); });
       if (normalise_(oldRows[duplicateRow-4][hh.Is_Latest_Event]) !== 'YES') history.getRange(duplicateRow,hh.Is_Latest_Event+1).setValue('YES');
-      persistLatestLeadState_(registry,lead.row,h,historyRowLatestNote_(dateKey_(oldRows[duplicateRow-4][hh.Event_Date]),String(oldRows[duplicateRow-4][hh.Event_Time]||''),outcome,storedNote),String(oldRows[duplicateRow-4][hh.Event_Date]||''),String(oldRows[duplicateRow-4][hh.Follow_Up_Date]||''),outcome,channel,user.name,nextAction,lead.values);
+      persistLatestLeadState_(registry,lead.row,h,historyRowLatestNote_(dateKey_(oldRows[duplicateRow-4][hh.Event_Date]),String(oldRows[duplicateRow-4][hh.Event_Time]||''),outcome,storedNote),String(oldRows[duplicateRow-4][hh.Event_Date]||''),String(oldRows[duplicateRow-4][hh.Follow_Up_Date]||''),outcome,channel,user.name,nextAction,lead.values,eventId);
       return {ok:true, duplicate:true, event_id:eventId, global_site_id:siteId};
     }
 
@@ -163,7 +170,7 @@ function logActivityForSignedInUser(request) {
     // Event_ID is checked under the script lock before this point.
     history.getRange(appendRow,1,1,historyLastCol).setValues([values]);
     demoteRows.forEach(r => history.getRange(r,hh.Is_Latest_Event+1).setValue('NO'));
-    persistLatestLeadState_(registry,lead.row,h,historyRowLatestNote_(date,time,outcome,storedNote),date,nextActionDate,outcome,channel,user.name,nextAction,lead.values);
+    persistLatestLeadState_(registry,lead.row,h,historyRowLatestNote_(date,time,outcome,storedNote),date,nextActionDate,outcome,channel,user.name,nextAction,lead.values,eventId);
     return {ok:true, duplicate:false, event_id:eventId, global_site_id:siteId, timestamp:isoNow_()};
   } finally {
     lock.releaseLock();
@@ -174,7 +181,7 @@ function historyRowLatestNote_(date,time,outcome,note) {
   return [date, time, outcome, note].filter(Boolean).join(' · ');
 }
 
-function persistLatestLeadState_(registry,rowNumber,h,latestNote,eventDate,nextActionDate,outcome,channel,repName,nextAction,priorRowValues) {
+function persistLatestLeadState_(registry,rowNumber,h,latestNote,eventDate,nextActionDate,outcome,channel,repName,nextAction,priorRowValues,eventId) {
   const setIfPresent = (name,value) => { if (h[name] != null) registry.getRange(rowNumber,h[name]+1).setValue(value); };
   // Keep the previous registry context before replacing the latest-note cell.
   // Retried event IDs must not append the same text a second time.
@@ -189,6 +196,8 @@ function persistLatestLeadState_(registry,rowNumber,h,latestNote,eventDate,nextA
     });
     if (history !== previousHistory) historyCell.setValue(history);
   }
+  // A technical note without a selected next action must not cancel a customer callback.
+  if (!nextAction && !nextActionDate && (outcome === 'app issue' || outcome === 'HOLD' || channel === 'app issue' || channel === 'blocker')) return;
   setIfPresent('Latest_Real_Notes',latestNote);
   setIfPresent('Latest_Activity_Date',eventDate);
   setIfPresent('Latest_Activity_Type',channel === 'call' ? 'CALL' : channel.toUpperCase());
@@ -198,16 +207,16 @@ function persistLatestLeadState_(registry,rowNumber,h,latestNote,eventDate,nextA
   setIfPresent('Last_Touched_Date',eventDate);
   setIfPresent('Last_Registry_Update',isoNow_());
   // A fresh activity makes any earlier queue explanation stale.
-  setIfPresent('Michael_Next_Action','');
-  setIfPresent('Michael_Call_Reason','');
-  setIfPresent('Michael_Reason_Event_Date','');
-  if (nextAction === 'CALL') {
-    setIfPresent('Michael_Next_Action','CALL');
-    setIfPresent('Michael_Call_Reason','A follow-up call was selected after the latest activity. Check the dated note for context.');
-    setIfPresent('Michael_Reason_Event_Date',eventDate);
-  } else if (['EMAIL','WAIT','NONE'].includes(nextAction)) {
+  setIfPresent('Latest_Event_ID',eventId || '');
+  setIfPresent('Next_Action',nextAction);
+  setIfPresent('Next_Action_Due_At',nextActionDate);
+  setIfPresent('Call_Reason',nextAction === 'CALL' ? 'Follow-up selected after this activity; read the original note.' : '');
+  setIfPresent('Action_Source_Event_ID',nextAction ? (eventId || '') : '');
+  // Keep the existing Michael columns compatible, without writing them for another rep.
+  if (normalise_(repName) === 'MICHAEL') {
     setIfPresent('Michael_Next_Action',nextAction);
-    setIfPresent('Michael_Reason_Event_Date',eventDate);
+    setIfPresent('Michael_Call_Reason',nextAction === 'CALL' ? 'Follow-up selected after this activity; read the original note.' : '');
+    setIfPresent('Michael_Reason_Event_Date',nextAction ? eventDate : '');
   }
   if (outcome === 'do not touch') {
     setIfPresent('Suppression_Status','YES');
@@ -215,7 +224,10 @@ function persistLatestLeadState_(registry,rowNumber,h,latestNote,eventDate,nextA
   }
   if (nextActionDate) {
     setIfPresent('Follow_Up_Date',nextActionDate);
-    if (outcome === 'customer waiting') setIfPresent('Callback_Date',nextActionDate);
+    setIfPresent('Callback_Date',nextAction === 'CALL' ? nextActionDate : '');
+  } else {
+    setIfPresent('Follow_Up_Date','');
+    setIfPresent('Callback_Date','');
   }
 }
 
@@ -251,7 +263,7 @@ function findActiveUser_(email) {
   return null;
 }
 
-function getAssignedQueue_(user, limit, snapshotIds, offset) {
+function getAssignedQueue_(user, limit, servedIds, dueOnly) {
   const sheet = getSheet_(CONFIG.REGISTRY_SHEET);
   const lastRow = sheet.getLastRow();
   const lastCol = sheet.getLastColumn();
@@ -268,11 +280,15 @@ function getAssignedQueue_(user, limit, snapshotIds, offset) {
   const today = Utilities.formatDate(new Date(),'Europe/London','yyyy-MM-dd');
   const nowTime = Utilities.formatDate(new Date(),'Europe/London','HH:mm');
   const stoppedIds = getLatestStoppedSiteIds_();
-  const reviewedQueue = getReviewedQueue_();
+  const reviewedQueue = getReviewedQueue_(user);
+  const served = new Set(servedIds || []);
+  let nextDue = '';
   for (let i = 1; i < values.length; i++) {
     const row = values[i];
     if (normalise_(row[h.Current_Owner]) !== ownerName) continue;
-    const queueItem = reviewedQueue[String(row[h.Global_Site_ID] || '').trim()];
+    const reviewed = reviewedQueue[String(row[h.Global_Site_ID] || '').trim()];
+    const queueItem = reviewed && reviewed.activityDate === dateKey_(value_(row,h,'Latest_Activity_Date')) &&
+      reviewed.registryVersion === value_(row,h,'Last_Registry_Update') ? reviewed : null;
     if (queueItem && queueItem.lane === 'HOLD') continue;
     const suppression = normalise_(row[h.Suppression_Status]);
     const allowedSuppression = ['', 'NO', 'CLEAR', 'NONE'];
@@ -294,41 +310,57 @@ function getAssignedQueue_(user, limit, snapshotIds, offset) {
       provider_reject: value_(row,h,'Provider_Reject_Status'),
       no_gym: value_(row,h,'No_Gym_Status'),
       ownership_conflict: value_(row,h,'Ownership_Conflict_Status'),
+      review_flag: value_(row,h,'Conflict_Review_Flag'),
+      review_reason: value_(row,h,'Conflict_Review_Reason'),
+      owner_evidence: value_(row,h,'Current_Owner_Evidence'),
       latest_notes: value_(row,h,'Latest_Real_Notes'),
       contact_history: value_(row,h,'Rep_Contact_History'),
       website: value_(row,h,'Website'),
       intent_level: value_(row,h,'Lead_Intent_Level'),
-      next_action: value_(row,h,'Michael_Next_Action'),
-      call_reason: value_(row,h,'Michael_Call_Reason'),
-      reason_event_date: value_(row,h,'Michael_Reason_Event_Date'),
+      intent_evidence: value_(row,h,'Intent_Signal_Evidence'),
+      next_action: value_(row,h,'Next_Action') || (ownerName === 'MICHAEL' ? value_(row,h,'Michael_Next_Action') : ''),
+      call_reason: value_(row,h,'Call_Reason') || (ownerName === 'MICHAEL' ? value_(row,h,'Michael_Call_Reason') : ''),
+      reason_event_date: ownerName === 'MICHAEL' ? value_(row,h,'Michael_Reason_Event_Date') : '',
+      action_source_event_id: value_(row,h,'Action_Source_Event_ID'),
+      latest_event_id: value_(row,h,'Latest_Event_ID'),
+      action_due_at: value_(row,h,'Next_Action_Due_At'),
       callback_date: value_(row,h,'Callback_Date'),
       follow_up_date: value_(row,h,'Follow_Up_Date'),
       latest_activity_date: value_(row,h,'Latest_Activity_Date')
     };
-    if (!lead.global_site_id) continue;
+    if (!lead.global_site_id || !lead.business_name || String(lead.phone).replace(/\D/g,'').length < 10) continue;
     const callability = normalise_(lead.callability);
-    if (stoppedIds[lead.global_site_id] || callability === 'NOT_CALLABLE' || callability === 'DO_NOT_CALL' || callability === 'EMAIL_ACTION_REQUIRED' || callability === 'WAITING_ON_DM_CALLBACK' || callability.startsWith('NOT_CALL_READY') || callability.startsWith('BLOCKED')) continue;
-    if ((normalise_(lead.manual_review) === 'YES' && !(queueItem && queueItem.lane === 'CALL')) ||
+    if (stoppedIds[lead.global_site_id] || callability === 'NOT_CALLABLE' || callability === 'DO_NOT_CALL' || callability.startsWith('BLOCKED')) continue;
+    if ((callability === 'EMAIL_ACTION_REQUIRED' || callability.startsWith('NOT_CALL_READY')) &&
+        !(currentQueueAction_(lead) === 'CALL' && lead.action_due_at)) continue;
+    const acceptedAssignment = ownerName === 'KRZYSZTOF' && normalise_(lead.master_category) === 'KRZYSZTOF_50_OWEN_COLD_CALL_READY' &&
+      normalise_(lead.lifecycle_status) === 'CURRENTLY_ASSIGNED_CALL_READY' && normalise_(lead.review_flag) === 'NO' &&
+      lead.review_reason === 'Direct Lead_ID, phone and other-active-rep parent-chain crossover controls clear at assignment.' &&
+      lead.owner_evidence.includes('Exact '+lead.global_site_id+' selected') && lead.owner_evidence.includes('reassigned to Krzysztof');
+    if ((normalise_(lead.manual_review) === 'YES' && !acceptedAssignment && !(queueItem && queueItem.lane === 'CALL')) ||
         normalise_(lead.provider_reject) === 'YES' || normalise_(lead.no_gym) === 'YES' || normalise_(lead.ownership_conflict) === 'YES') continue;
     if (['RESEARCH_HOLD','BOYS_POOL_AVAILABLE_NOT_CALL_READY','OWNERSHIP_CONFLICT_QUARANTINE'].includes(normalise_(lead.master_category))) continue;
     if (normalise_(lead.lifecycle_status) === 'CLOSED_LOST' || normalise_(lead.closed_lost) === 'YES') continue;
     if (['LOST','NOT INTERESTED','NOT INT.','PERMANENT CLOSURE CONFIRMED'].includes(normalise_(lead.latest_outcome)) || normalise_(lead.activity_status) === 'PERMANENT CLOSURE CONFIRMED') continue;
     const signal = queueSignal_(lead,queueItem,today,nowTime);
     if (!signal) continue;
+    if (signal.lane === 'LATER_TODAY') {
+      if (!nextDue || signal.sortDate < nextDue) nextDue = signal.sortDate;
+      continue;
+    }
     lead.queue_reason = signal.reason;
     lead.queue_reason_date = signal.sourceDate;
     lead.queue_lane = signal.lane;
     lead._rank = signal.rank;
     lead._sortDate = signal.sortDate;
-    all.push(lead); byId[lead.global_site_id]=lead;
+    if (!byId[lead.global_site_id]) { all.push(lead); byId[lead.global_site_id]=lead; }
   }
   all.sort((a,b) => a._rank-b._rank || a._sortDate.localeCompare(b._sortDate) || a.global_site_id.localeCompare(b.global_site_id));
-  const queueIds = snapshotIds || all.map(l => l.global_site_id);
-  const total = queueIds.length;
-  const start = Number(offset)||0;
-  const leads = queueIds.slice(start,start+limit).map(id=>byId[id]).filter(Boolean);
+  const remaining = all.filter(l => !served.has(l.global_site_id));
+  const candidates = dueOnly ? remaining.filter(l => l.queue_lane === 'DUE') : remaining;
+  const leads = candidates.slice(0,limit);
   leads.forEach(l => { delete l._rank; delete l._sortDate; });
-  return {total:total,leads:leads,next_cursor:start+limit<total?String(start+limit):'',queue_ids:queueIds};
+  return {total:all.length,leads:leads,remaining:remaining.length-leads.length,queue_ids:all.map(l=>l.global_site_id),next_due_at:nextDue};
 }
 
 function queueDays_(from,to) {
@@ -365,56 +397,80 @@ function recentRoute_(notes,today) {
   return null;
 }
 
+function currentQueueAction_(lead) {
+  if (lead.action_source_event_id || lead.latest_event_id) {
+    return lead.action_source_event_id && lead.action_source_event_id === lead.latest_event_id ? normalise_(lead.next_action) : '';
+  }
+  return dateKey_(lead.reason_event_date) === dateKey_(lead.latest_activity_date) && dateKey_(lead.reason_event_date) ? normalise_(lead.next_action) : '';
+}
+
+function queueDue_(value,today,nowTime) {
+  const text = String(value || '').trim();
+  const date = dateKey_(text);
+  if (!date) return null;
+  const time = text.match(/(?:T|\s)(\d{2}:\d{2})/);
+  const range = text.match(/(\d{2}:\d{2})\s*[-\u2013]\s*(\d{2}:\d{2})/);
+  const future = date > today || (date === today && time && time[1] > nowTime);
+  return {date,time:time ? time[1] : '00:00',future,expiredWindow:date === today && range && range[2] < nowTime};
+}
+
 function queueSignal_(lead,queueItem,today,nowTime) {
   const age = queueDays_(lead.latest_activity_date,today);
   const outcome = normalise_(lead.latest_outcome);
   const status = normalise_(lead.activity_status);
   const category = normalise_(lead.master_category);
-  const action = normalise_(lead.next_action);
+  const action = currentQueueAction_(lead);
   const sourceDate = dateKey_(lead.latest_activity_date);
   const lastText = String(lead.latest_outcome || '').toLowerCase();
   const lastNote = String(lead.latest_notes || '').split(/\s+\|\s+/).pop() || '';
-  const miss = /^(?:VM|NA|VOICEMAIL|NO ANSWER)\b/.test(outcome) || ['VOICEMAIL','NO ANSWER'].includes(status);
-  if (/\b(?:PROVIDER REJECT|NOT INTERESTED|DO NOT CALL|PERMANENT CLOSURE)\b/.test(outcome+' '+status) ||
-      /\b(?:HOLD|PARKED|AWAITING REPLY|EMAIL SENT|DNC)\b/.test(status)) return null;
-  const blockedText = /(?:email first|best (?:form|way) of contact is (?:via )?email|asked (?:me|us) to (?:send|email)|quote (?:send )?paused|supplier agreement hold|customer will reach out|not looking for anything|wait for (?:lee|customer|supplier))/i.test(lastText);
+  const actualMiss = /^(?:VM|NA|VOICEMAIL|NO ANSWER)\b/.test(outcome);
+  const miss = actualMiss || ['VOICEMAIL','NO ANSWER'].includes(status);
+  const latestEmail = /^(?:EMAILED|EMAIL SENT|EMAIL REQUESTED|EMAIL ROUTE)/.test(outcome);
+  if (/\b(?:PROVIDER REJECT|NOT INTERESTED|NOT INT\.|DO NOT CALL|PERMANENT CLOSURE|DEAD AIR|NOT APPLICABLE)\b/.test(outcome+' '+status) ||
+      (/\b(?:HOLD|PARKED|AWAITING REPLY|EMAIL SENT|DNC)\b/.test(status) && action !== 'CALL')) return null;
+  const blockedText = /(?:email first|best (?:form|way) of contact is (?:via )?email|asked (?:me|us) to (?:send|email)|told (?:me|us) (?:to |an? )email|quote (?:send )?paused|supplier agreement hold|customer will reach out|not looking for anything|no (?:current|active|immediate) (?:need|requirement|opportunity|budget)|wait for (?:lee|customer|supplier))/i.test(lastText);
   const disqualifiedNote = /(?:permanently? closed|closed forever|permanent closure|not a gym|no gym|do not call|\bDNC\b|not interested|no longer operating|closed down)/i.test(lastNote);
   const needsNumberReview = /(?:research flag|new number|number needs (?:checking|updating))/i.test(lastNote);
-  const testEvent = /(?:aresfit dialer event:\s*test\b|^test (?:note|log|logging)\b)/i.test(lead.latest_notes);
+  const testEvent = /(?:aresfit dialer event:\s*test\b|^test (?:note|log|logging)\b)/i.test(lastNote);
   if (['EMAIL','WAIT','NONE','HOLD'].includes(action) || blockedText || disqualifiedNote || needsNumberReview || testEvent) return null;
+  if (latestEmail && action !== 'CALL') return null;
+  if (/\b(?:gave|give|given)\b.*\bnumber\b|\bnew (?:owner )?(?:number|mobile)\b/i.test(lastText+' '+lastNote)) return null;
   if (queueItem && queueItem.lane === 'HOLD') return null;
 
   // Explicit next actions are valid only against the same source activity.
-  if (action === 'CALL' && lead.call_reason &&
-      dateKey_(lead.reason_event_date) === sourceDate && age <= 21 && !miss) {
-    const explicitDueText = lead.callback_date || lead.follow_up_date;
-    const explicitDue = dateKey_(explicitDueText);
-    if (explicitDue && explicitDue > today) return null;
-    if (!explicitDue && age < 1) return null;
-    const time = String(explicitDueText).match(/(?:T|\s)(\d{2}:\d{2})/);
-    const laterToday = explicitDue === today && time && time[1] > nowTime;
-    return {lane:laterToday?'LATER_TODAY':'FOLLOW_UP',rank:laterToday?3500:1000,
-      sortDate:explicitDue || sourceDate,
+  if (action === 'CALL' && lead.call_reason && (!miss || lead.action_due_at)) {
+    const due = queueDue_(lead.action_due_at || lead.callback_date || lead.follow_up_date,today,nowTime);
+    if (due && (due.date > today || due.expiredWindow)) return null;
+    if (!due && age < 1) return null;
+    const laterToday = due && due.future;
+    return {lane:laterToday?'LATER_TODAY':due?'DUE':'FOLLOW_UP',rank:laterToday?3500:due && due.date === today?500:1000,
+      sortDate:due ? due.date+' '+due.time : sourceDate,
       reason:lead.call_reason,sourceDate};
   }
 
-  const dueText = lead.callback_date || lead.follow_up_date;
+  const dueText = (action ? lead.action_due_at : '') || lead.callback_date || lead.follow_up_date;
   const due = dateKey_(dueText);
   const daysPastDue = queueDays_(due,today);
-  const callbackEvidence = /CALLBACK|CALL BACK|DM AVAILABLE|RING BACK/.test(outcome+' '+status);
-  if (callbackEvidence && age <= 14 && due && daysPastDue >= 0 && daysPastDue <= 3 &&
+  const callbackEvidence = /CALLBACK|CALL BACK|DM AVAILABLE|RING BACK/.test(outcome+' '+status+' '+normalise_(lead.callability));
+  const schedule = queueDue_(dueText,today,nowTime);
+  if (due && (due > today || schedule.expiredWindow)) return null;
+  if (callbackEvidence && !miss && due && daysPastDue >= 0 &&
       (!sourceDate || due >= sourceDate)) {
-    const time = String(dueText).match(/(?:T|\s)(\d{2}:\d{2})/);
-    const laterToday = due === today && time && time[1] > nowTime;
-    return {lane:laterToday?'LATER_TODAY':'DUE',rank:laterToday?3500:1500,
-      sortDate:due+' '+(time ? time[1] : '00:00'),
-      reason:laterToday?'Decision-maker callback due later today at '+time[1]+'.':'Recent decision-maker callback is due.',
+    // A missed one-off gatekeeper availability slot is not a standing buyer promise.
+    if (daysPastDue > 14 && /\[GK\]|gatekeeper|\bGK\b/i.test(lastNote+' '+lead.latest_outcome)) return null;
+    if (daysPastDue > 3 && /\[GK\]|gatekeeper|\bGK\b/i.test(lastNote+' '+lead.latest_outcome)) {
+      return {lane:'RETRY',rank:4600,sortDate:due,reason:'Earlier gatekeeper availability has passed. Recheck availability; no buyer interest is confirmed.',sourceDate};
+    }
+    const laterToday = schedule.future;
+    return {lane:laterToday?'LATER_TODAY':'DUE',rank:laterToday?3500:due === today?500:1500,
+      sortDate:due+' '+schedule.time,
+      reason:laterToday?'Callback due today at '+schedule.time+'.':due === today?'Requested callback is due today.':'Unresolved callback from '+due+' is overdue; read the original note.',
       sourceDate};
   }
 
   if (!miss && age <= 21 && normalise_(lead.intent_level) === 'ACTIVE_OPPORTUNITY' &&
       /CONTACTED|REACHED|CALLBACK/.test(outcome+' '+status) &&
-      /\b(?:INTERESTED|EQUIPMENT|REPLACEMENT|BUDGET|PRICING|BUYING|NEEDS? KIT)\b/.test(outcome) &&
+      /\b(?:INTERESTED|EQUIPMENT|REPLACEMENT|BUDGET|PRICING|BUYING|NEEDS? KIT)\b/i.test(outcome+' '+lastNote) &&
       !/QUOTE|EMAIL|SUPPLIER|BLOCKED|WAITING|NOT INTERESTED/.test(outcome+' '+status)) {
     return {lane:'FOLLOW_UP',rank:2000,sortDate:sourceDate,
       reason:'Recent buyer conversation needs a follow-up call; check the dated notes before dialing.',sourceDate};
@@ -424,7 +480,8 @@ function queueSignal_(lead,queueItem,today,nowTime) {
     const streak = recentMissStreak_(lead.latest_notes);
     if (streak >= 4 && age < 10) return null;
     const route = recentRoute_(lead.latest_notes,today);
-    const targeted = route && streak < 3;
+    const oneOff = route && /\b(?:today|tomorrow|tonight|minutes?|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b|\b\d{1,2}\s*(?:am|pm)\b/i.test(route.detail);
+    const targeted = route && queueDays_(route.date,today) <= 2 && !oneOff && streak < 3;
     const namedBuyerRoute = targeted && /\b(?:DM|DECISION MAKER|OWNER)\b/i.test(route.detail);
     return {lane:'RETRY',rank:targeted ? 2900+(namedBuyerRoute?0:120)+Math.min(2,streak)*150+Math.abs(age-5)*5 : streak >= 3 ? 5500 : 4500+Math.abs(age-7)*5,
       sortDate:sourceDate,
@@ -439,17 +496,19 @@ function queueSignal_(lead,queueItem,today,nowTime) {
   const ambiguousSite = /\b(?:SCHOOL|COLLEGE|UNIVERSITY|GOLF|POOLS?|LEISURE CENTRE|SPORTS CENTRE)\b/i.test(lead.business_name);
   const usablePhone = /^0\d{9,10}$/.test(String(lead.phone || '').replace(/\D/g,''));
   const priorCall = /\b\d{1,2}\/\d{1,2}\s+\d{1,2}:\d{2}\s*-\s*(?:VM|NA|CONTACTED|CALLBACK|DEAD AIR|NOT INT\.)\b/i.test(lead.latest_notes+' | '+lead.contact_history);
-  if (coldStatus && gymName && !ambiguousSite && usablePhone && lead.website &&
+  const assignedReady = category === 'KRZYSZTOF_50_OWEN_COLD_CALL_READY' && normalise_(lead.lifecycle_status) === 'CURRENTLY_ASSIGNED_CALL_READY';
+  if (coldStatus && (gymName || assignedReady) && (!ambiguousSite || assignedReady) && usablePhone && (lead.website || assignedReady) &&
       !priorCall &&
-      ['UNRESOLVED','HISTORICAL_ONLY','MICHAEL ACTIVE/TOUCHED ADDENDUM'].includes(category)) {
-    return {lane:'COLD',rank:category === 'UNRESOLVED' ? 3250 : 4800,sortDate:lead.global_site_id,
-      reason:'Cold gym candidate with a phone and website; no current buying signal is recorded.',sourceDate};
+      ['UNRESOLVED','HISTORICAL_ONLY','MICHAEL ACTIVE/TOUCHED ADDENDUM','KRZYSZTOF_50_OWEN_COLD_CALL_READY','ACTIVE_ASSIGNED'].includes(category)) {
+    return {lane:'COLD',rank:4800,sortDate:lead.global_site_id,
+      reason:assignedReady ? 'Reviewed cold assignment; no current buying signal is recorded.' : 'Cold gym candidate with a phone and website; no current buying signal is recorded.',sourceDate};
   }
   return null;
 }
 
-function getReviewedQueue_() {
-  const sheet = getSheet_('Michael Call Queue');
+function getReviewedQueue_(user) {
+  const sheet = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID).getSheetByName(user.name + ' Call Queue');
+  if (!sheet) return {};
   const values = sheet.getDataRange().getDisplayValues();
   if (!values.length) throw new Error('Michael Call Queue is empty.');
   const h = headerIndex_(values[0]);
