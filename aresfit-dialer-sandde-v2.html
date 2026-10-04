@@ -2758,7 +2758,7 @@ function renderCard(){
   const lostReasonReady=pendingEventOutcome!=='lost'||!!pending.reason;
   const canNext=noteReady&&callbackReady&&lostReasonReady;
 
-  const callInfo=pending.callStartTs?`<div class="call-info show ${pending.dialCopyOk===true?'success':(pending.dialCopyOk===false?'danger':'')}">Dial requested <span class="t">${hhmm(pending.callStartTs)}</span> - ${esc(pending.dialFeedback||'number remains visible while the phone handles the request.')}</div>`:'';
+  const callInfo=pending.callStartTs?`<div class="call-info show ${pending.dialCopyOk===true?'success':(pending.dialCopyOk===false?'danger':'')}">${pending.dialRoute==='google-search'?'Google search opened':'Dial requested'} <span class="t">${hhmm(pending.callStartTs)}</span> - ${esc(pending.dialFeedback||'number remains visible while the phone handles the request.')}</div>`:'';
 
   // P1: Virgin row check + gates
   const virgin=!l.notes.some(n=>!n.legacy);
@@ -2802,10 +2802,14 @@ function renderCard(){
       <button class="call-btn" onclick="tapCall('secondary')" ${gatesPassed2?'':'disabled'} style="${gatesPassed2?'':'opacity:.4;cursor:not-allowed;'}font-size:13px;padding:10px">CALL ALT<span class="n">${phone2Fmt}</span></button>
       <button class="copy-btn" onclick="copyPhone2()">Copy</button>
     </div>`:'';
+  const primaryCallControl=phoneFmt&&gatesPassed
+    ?`<a class="call-btn" href="https://www.google.com/search?q=${encodeURIComponent(phoneFmt)}" target="_blank" rel="noopener" data-handoff="google" aria-label="Open Google search and copy this phone number" title="Open Google search and copy this phone number" onclick="tapCall('primary',event)" style="display:block;text-align:center;text-decoration:none">CALL<span class="n">${phoneFmt}</span></a>`
+    :`<button class="call-btn" disabled style="opacity:.4;cursor:not-allowed">CALL<span class="n">${phoneFmt||'(no number)'}</span></button>`;
   const callControls=`${mobileGate}${callInfo}
     <div class="call-row">
-      <button class="call-btn" onclick="tapCall('primary')" ${gatesPassed?'':'disabled'} style="${gatesPassed?'':'opacity:.4;cursor:not-allowed'}">CALL<span class="n">${phoneFmt||'(no number)'}</span></button>
+      ${primaryCallControl}
       <button class="copy-btn" onclick="copyPhone()">Copy</button>
+      ${phoneFmt?'':`<span class="copy-btn" aria-disabled="true" title="Unavailable because this lead has no phone number">Google unavailable</span>`}
     </div>
     ${emailBtn}${emailConfirmation}`;
 
@@ -3823,20 +3827,22 @@ async function copyWithFeedback(text,successMessage){
   showToast(result.ok?successMessage:'Copy failed - the text remains visible',result.ok?'':'danger');
   return result;
 }
-function tapCall(which){
-  const l=filtered[idx];if(!l)return;
+function tapCall(which,event){
+  const l=filtered[idx];if(!l){if(event)event.preventDefault();return}
   const num=which==='secondary'?(l.phone2||''):(l.phone||'');
   const dialNumber=normaliseDialNumber(num);
   const ukNumber=normaliseLeadPhone(num);
-  if(!dialNumber){alert('No phone number on this row');return}
+  if(!dialNumber){if(event)event.preventDefault();alert('No phone number on this row');return}
   // Mobile gate now applies to phone2 too - was only enforced on primary before.
-  if(ukNumber.startsWith('07')&&!l.mobileVerified){alert('Mobile number - tick "verified on website" before dialling.');return}
+  if(ukNumber.startsWith('07')&&!l.mobileVerified){if(event)event.preventDefault();alert('Mobile number - tick "verified on website" before dialling.');return}
   const gate=dialGateState(l);
   if(gate.state==='blocked'){
+    if(event)event.preventDefault();
     alert(gate.message||'This row cannot be called');
     return;
   }
   if(gate.state==='fresh-blocked'){
+    if(event)event.preventDefault();
     alert('Fresh dials blocked. Review warm queue and blockers first, or add an override reason in Settings.');
     openSettings();
     return;
@@ -3847,30 +3853,31 @@ function tapCall(which){
   l.pending.callStartTs=callTs;
   l.pending.editedHm='';
   const copyPromise=copyTextVerified(dialNumber);
-  const route=dialRouteForNumber(dialNumber);
+  const googleHandoff=!!(event&&event.currentTarget&&event.currentTarget.dataset.handoff==='google');
+  const route=googleHandoff?{kind:'google-search',href:event.currentTarget.href}:dialRouteForNumber(dialNumber);
   l.pending.dialRoute=route.kind;
-  l.pending.dialFeedback='request sent; number remains visible until copy is confirmed.';
+  l.pending.dialFeedback=googleHandoff?'Google search opened; number remains visible until copy is confirmed.':'request sent; number remains visible until copy is confirmed.';
   delete l.pending.dialCopyOk;
   lastExternalLaunchAt=Date.now();
   recordDialDiagnostic(route.kind,dialNumberKind(num));
   save();
-  try{launchHrefFromUserGesture(route.href)}catch(error){
+  try{if(!googleHandoff)launchHrefFromUserGesture(route.href)}catch(error){
     l.pending.dialRoute='launch-error';
     l.pending.dialFeedback='external request failed; use Copy or tap the visible number.';
     l.pending.dialCopyOk=false;
     recordDialDiagnostic('launch-error',dialNumberKind(num));
     showToast('Dial request failed - number remains visible','danger');
   }
-  renderCard();
+  if(!googleHandoff)renderCard();
   copyPromise.then(result=>{
     recordClipboardDiagnostic(result);
     if(l.pending&&l.pending.callStartTs===callTs){
       l.pending.dialCopyOk=!!result.ok;
-      l.pending.dialFeedback=result.ok?'number copied; external open requested.':'copy failed; number remains visible.';
+      l.pending.dialFeedback=googleHandoff?(result.ok?'Google search opened; number copied.':'Google search opened; copy failed; number remains visible.'):(result.ok?'number copied; external open requested.':'copy failed; number remains visible.');
       save();
       if(filtered[idx]&&String(filtered[idx].id)===String(l.id))renderCard();
     }
-    showToast(result.ok?'Dial request sent - number copied':'Dial request sent - copy failed; number remains visible',result.ok?'':'danger');
+    showToast(googleHandoff?(result.ok?'Google search opened - number copied':'Google search opened - copy failed; number remains visible'):(result.ok?'Dial request sent - number copied':'Dial request sent - copy failed; number remains visible'),result.ok?'':'danger');
   });
 }
 async function copyPhone(){const l=filtered[idx];if(!l)return;const d=normaliseDialNumber(l.phone);if(!d)return;await copyWithFeedback(d,'Phone number copied')}
